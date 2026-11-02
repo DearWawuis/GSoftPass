@@ -1,0 +1,34 @@
+{
+  "manifest_version": 3,
+  "name": "GSoftPass - Gestor de Contraseñas Zero-Knowledge",
+  "version": "1.0.0",
+  "description": "Autocompletado inteligente, Passkeys, generador seguro y bóveda cifrada AES-256.",
+  "icons": {
+    "16": "icon.png",
+    "32": "icon.png",
+    "48": "icon.png",
+    "128": "icon.png"
+  },
+  "permissions": ["storage", "activeTab", "scripting"],
+  "host_permissions": ["<all_urls>"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "GSoftPass",
+    "default_popup": "index.html",
+    "default_icon": {
+      "16": "icon.png",
+      "32": "icon.png",
+      "48": "icon.png",
+      "128": "icon.png"
+    }
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["contentScript.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}

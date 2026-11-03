@@ -1,5 +1,5 @@
-// src/screens/AuthScreen.tsx (Actualización con Recuperación de Contraseña)
-import React, { useState, useRef } from 'react';
+// src/screens/AuthScreen.tsx
+import React, { useState, useRef, useEffect } from 'react';
 import {
   View,
   Text,
@@ -10,7 +10,18 @@ import {
   Platform,
   ActivityIndicator,
 } from 'react-native';
-import { ShieldCheck, Lock, Mail, Eye, EyeOff, ArrowRight, Globe } from 'lucide-react-native';
+import {
+  ShieldCheck,
+  Lock,
+  Mail,
+  Eye,
+  EyeOff,
+  ArrowRight,
+  Globe,
+  Fingerprint,
+  KeyRound,
+} from 'lucide-react-native';
+import * as LocalAuthentication from 'expo-local-authentication';
 import { getAuth, sendPasswordResetEmail } from 'firebase/auth';
 import { Colors } from '../theme/colors';
 import { CryptoService } from '../services/CryptoService';
@@ -55,10 +66,126 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
   const [loading, setLoading] = useState(false);
   const [legalVisible, setLegalVisible] = useState(false);
 
+  // Estados de Biometría (Huella / Rostro) y 2FA
+  const [savedBioSession, setSavedBioSession] = useState<{
+    uid: string;
+    email: string;
+    derivedKey: string;
+  } | null>(null);
+  const [pending2FASession, setPending2FASession] = useState<{
+    uid: string;
+    email: string;
+    derivedKey: string;
+    items: VaultItem[];
+    folders: CustomFolder[];
+    secret: string;
+  } | null>(null);
+  const [totpCode, setTotpCode] = useState('');
+
   const passwordInputRef = useRef<TextInput>(null);
   const confirmInputRef = useRef<TextInput>(null);
 
-  // Función para enviar correo de restablecimiento de contraseña
+  useEffect(() => {
+    checkBiometricSession();
+  }, []);
+
+  const checkBiometricSession = async () => {
+    if (Platform.OS === 'web') return;
+    const raw = await StorageService.getItem('biometric_enabled_session');
+    if (raw) {
+      try {
+        const parsed = JSON.parse(raw);
+        if (parsed?.email && parsed?.derivedKey) {
+          setSavedBioSession(parsed);
+          setEmail(parsed.email);
+        }
+      } catch {}
+    }
+  };
+
+  // Desbloqueo con Huella Digital o Rostro (previamente habilitado por el usuario)
+  const handleBiometricLogin = async () => {
+    if (!savedBioSession) return;
+    setErrorMsg('');
+
+    const authResult = await LocalAuthentication.authenticateAsync({
+      promptMessage: `Desbloquear bóveda de ${savedBioSession.email}`,
+      cancelLabel: 'Usar Contraseña Maestra',
+    });
+
+    if (!authResult.success) return;
+
+    setLoading(true);
+    try {
+      const userStorageKey = `user_${savedBioSession.email.replace(/[^a-z0-9]/g, '_')}`;
+      const encryptedVault = await StorageService.getItem(`${userStorageKey}_vault`);
+      let items: VaultItem[] = [];
+      let folders: CustomFolder[] = DEFAULT_FOLDERS;
+
+      if (encryptedVault) {
+        const decrypted = CryptoService.decryptVault<{
+          items: VaultItem[];
+          folders: CustomFolder[];
+        }>(encryptedVault, savedBioSession.derivedKey);
+        if (decrypted) {
+          items = decrypted.items;
+          folders = decrypted.folders;
+        }
+      }
+
+      await proceedOrRequire2FA(
+        savedBioSession.uid,
+        savedBioSession.email,
+        savedBioSession.derivedKey,
+        items,
+        folders
+      );
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const proceedOrRequire2FA = async (
+    uid: string,
+    cleanEmail: string,
+    derivedKey: string,
+    items: VaultItem[],
+    folders: CustomFolder[]
+  ) => {
+    const userStorageKey = `user_${cleanEmail.replace(/[^a-z0-9]/g, '_')}`;
+    const saved2FASecret = await StorageService.getItem(`${userStorageKey}_2fa_secret`);
+
+    if (saved2FASecret) {
+      setPending2FASession({
+        uid,
+        email: cleanEmail,
+        derivedKey,
+        items,
+        folders,
+        secret: saved2FASecret,
+      });
+      setTotpCode('');
+    } else {
+      onAuthenticated(uid, cleanEmail, derivedKey, items, folders);
+    }
+  };
+
+  const handleVerify2FA = () => {
+    if (!pending2FASession) return;
+    if (CryptoService.verifyTOTPCode(pending2FASession.secret, totpCode)) {
+      onAuthenticated(
+        pending2FASession.uid,
+        pending2FASession.email,
+        pending2FASession.derivedKey,
+        pending2FASession.items,
+        pending2FASession.folders
+      );
+      setPending2FASession(null);
+    } else {
+      setErrorMsg('Código 2FA inválido o expirado. Verifica tu app autenticadora.');
+    }
+  };
+
   const handleForgotPassword = async () => {
     setErrorMsg('');
     setSuccessMsg('');
@@ -153,7 +280,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
         }
 
         if (!encryptedVault) {
-          onAuthenticated(uid, cleanEmail, derivedKey, [], DEFAULT_FOLDERS);
+          await proceedOrRequire2FA(uid, cleanEmail, derivedKey, [], DEFAULT_FOLDERS);
           return;
         }
 
@@ -168,7 +295,13 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
           return;
         }
 
-        onAuthenticated(uid, cleanEmail, derivedKey, decrypted.items, decrypted.folders);
+        await proceedOrRequire2FA(
+          uid,
+          cleanEmail,
+          derivedKey,
+          decrypted.items,
+          decrypted.folders
+        );
       }
     } catch {
       setErrorMsg('Error de autenticación. Verifica tus datos o tu conexión.');
@@ -176,6 +309,59 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
       setLoading(false);
     }
   };
+
+  // Vista de Verificación de Segundo Factor (2FA) si la cuenta lo tiene activo
+  if (pending2FASession) {
+    return (
+      <KeyboardAvoidingView style={styles.container}>
+        <View style={styles.card}>
+          <View style={styles.logoContainer}>
+            <View style={styles.iconBadge}>
+              <KeyRound size={34} color={Colors.primary} />
+            </View>
+            <Text style={styles.brandTitle}>Verificación 2FA</Text>
+            <Text style={styles.brandSubtitle}>
+              Ingresa el código de 6 dígitos generado por tu aplicación autenticadora para{' '}
+              {pending2FASession.email}
+            </Text>
+          </View>
+
+          {errorMsg ? (
+            <View style={styles.errorBox}>
+              <Text style={styles.errorText}>{errorMsg}</Text>
+            </View>
+          ) : null}
+
+          <TextInput
+            style={styles.totpInput}
+            placeholder="000000"
+            placeholderTextColor={Colors.textMuted}
+            keyboardType="number-pad"
+            maxLength={6}
+            value={totpCode}
+            onChangeText={setTotpCode}
+            returnKeyType="done"
+            onSubmitEditing={handleVerify2FA}
+          />
+
+          <TouchableOpacity style={styles.primaryButton} onPress={handleVerify2FA}>
+            <Text style={styles.primaryButtonText}>Verificar y Desbloquear</Text>
+            <ArrowRight size={18} color={Colors.background} />
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={styles.switchModeBtn}
+            onPress={() => {
+              setPending2FASession(null);
+              setErrorMsg('');
+            }}
+          >
+            <Text style={styles.switchModeText}>Volver al inicio de sesión</Text>
+          </TouchableOpacity>
+        </View>
+      </KeyboardAvoidingView>
+    );
+  }
 
   return (
     <KeyboardAvoidingView
@@ -319,6 +505,21 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
           )}
         </TouchableOpacity>
 
+        {/* Botón de Desbloqueo Biométrico con Huella / Rostro (si fue habilitado previamente) */}
+        {!isRegistering && savedBioSession && (
+          <TouchableOpacity
+            style={styles.biometricButton}
+            onPress={handleBiometricLogin}
+            accessibilityRole="button"
+            accessibilityLabel="Iniciar sesión con huella o rostro"
+          >
+            <Fingerprint size={20} color={Colors.primary} />
+            <Text style={styles.biometricButtonText}>
+              Entrar con Huella / Rostro
+            </Text>
+          </TouchableOpacity>
+        )}
+
         <TouchableOpacity
           style={styles.switchModeBtn}
           onPress={() => {
@@ -333,7 +534,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
         </TouchableOpacity>
 
         <TouchableOpacity
-          style={{ marginTop: 16, alignItems: 'center' }}
+          style={{ marginTop: 14, alignItems: 'center' }}
           onPress={() => setLegalVisible(true)}
         >
           <Text style={{ color: Colors.textMuted, fontSize: 12, textDecorationLine: 'underline' }}>
@@ -353,7 +554,7 @@ const styles = StyleSheet.create({
     backgroundColor: Colors.background,
     alignItems: 'center',
     justifyContent: 'center',
-    padding: 20,
+    padding: 18,
   },
   langBar: {
     flexDirection: 'row',
@@ -361,7 +562,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     gap: 6,
-    marginBottom: 16,
+    marginBottom: 14,
   },
   langChip: {
     paddingVertical: 5,
@@ -389,33 +590,33 @@ const styles = StyleSheet.create({
     maxWidth: 420,
     backgroundColor: Colors.surface,
     borderRadius: 20,
-    padding: 28,
+    padding: 24,
     borderWidth: 1,
     borderColor: Colors.border,
   },
   logoContainer: {
     alignItems: 'center',
-    marginBottom: 24,
+    marginBottom: 20,
   },
   iconBadge: {
-    width: 68,
-    height: 68,
+    width: 64,
+    height: 64,
     borderRadius: 20,
     backgroundColor: 'rgba(6, 182, 212, 0.12)',
     alignItems: 'center',
     justifyContent: 'center',
-    marginBottom: 12,
+    marginBottom: 10,
     borderWidth: 1,
     borderColor: 'rgba(6, 182, 212, 0.3)',
   },
   brandTitle: {
-    fontSize: 28,
+    fontSize: 26,
     fontWeight: '800',
     color: Colors.textPrimary,
     letterSpacing: 0.5,
   },
   brandSubtitle: {
-    fontSize: 14,
+    fontSize: 13,
     color: Colors.textSecondary,
     marginTop: 4,
     textAlign: 'center',
@@ -426,11 +627,11 @@ const styles = StyleSheet.create({
     borderColor: Colors.danger,
     borderRadius: 10,
     padding: 12,
-    marginBottom: 16,
+    marginBottom: 14,
   },
   errorText: {
     color: '#FCA5A5',
-    fontSize: 13,
+    fontSize: 12,
     textAlign: 'center',
   },
   successBox: {
@@ -439,26 +640,27 @@ const styles = StyleSheet.create({
     borderColor: Colors.success,
     borderRadius: 10,
     padding: 12,
-    marginBottom: 16,
+    marginBottom: 14,
   },
   successText: {
     color: '#6EE7B7',
-    fontSize: 13,
+    fontSize: 12,
     textAlign: 'center',
   },
   inputGroup: {
-    marginBottom: 16,
+    marginBottom: 14,
   },
   passwordLabelRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: 8,
+    marginBottom: 6,
   },
   label: {
     color: Colors.textSecondary,
     fontSize: 13,
     fontWeight: '600',
+    marginBottom: 6,
   },
   forgotText: {
     color: Colors.primary,
@@ -471,38 +673,68 @@ const styles = StyleSheet.create({
     backgroundColor: Colors.surfaceLight,
     borderRadius: 12,
     paddingHorizontal: 14,
-    height: 50,
+    height: 48,
     borderWidth: 1,
     borderColor: Colors.border,
   },
   input: {
     flex: 1,
     color: Colors.textPrimary,
-    fontSize: 15,
+    fontSize: 14,
     marginLeft: 10,
+  },
+  totpInput: {
+    backgroundColor: Colors.surfaceLight,
+    color: Colors.textPrimary,
+    borderRadius: 12,
+    height: 54,
+    fontSize: 22,
+    fontWeight: '800',
+    letterSpacing: 8,
+    textAlign: 'center',
+    borderWidth: 1,
+    borderColor: Colors.primary,
+    marginBottom: 14,
   },
   primaryButton: {
     backgroundColor: Colors.primary,
-    height: 52,
+    height: 50,
     borderRadius: 12,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    marginTop: 8,
+    marginTop: 6,
     gap: 8,
   },
   primaryButtonText: {
     color: Colors.background,
-    fontSize: 16,
-    fontWeight: '700',
+    fontSize: 15,
+    fontWeight: '800',
+  },
+  biometricButton: {
+    marginTop: 10,
+    height: 48,
+    borderRadius: 12,
+    backgroundColor: 'rgba(6, 182, 212, 0.12)',
+    borderWidth: 1,
+    borderColor: Colors.primary,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+  },
+  biometricButtonText: {
+    color: Colors.primary,
+    fontSize: 14,
+    fontWeight: '800',
   },
   switchModeBtn: {
-    marginTop: 20,
+    marginTop: 16,
     alignItems: 'center',
   },
   switchModeText: {
     color: Colors.primary,
-    fontSize: 14,
+    fontSize: 13,
     fontWeight: '600',
   },
 });

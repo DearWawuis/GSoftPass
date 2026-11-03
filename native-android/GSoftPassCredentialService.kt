@@ -1,12 +1,12 @@
 // native-android/GSoftPassCredentialService.kt
 package com.gsoftpass.app.autofill
 
-import android.app.PendingIntent
-import android.content.Intent
+import android.app.slice.Slice
+import android.app.slice.SliceSpec
 import android.credentials.ClearCredentialStateException
 import android.credentials.CreateCredentialException
 import android.credentials.GetCredentialException
-import android.graphics.drawable.Icon
+import android.net.Uri
 import android.os.Build
 import android.os.CancellationSignal
 import android.os.OutcomeReceiver
@@ -16,25 +16,14 @@ import androidx.annotation.RequiresApi
 @RequiresApi(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
 class GSoftPassCredentialService : CredentialProviderService() {
 
-    override fun onBeginCreateCredentialRequest(
+    override fun onBeginCreateCredential(
         request: BeginCreateCredentialRequest,
         cancellationSignal: CancellationSignal,
         callback: OutcomeReceiver<BeginCreateCredentialResponse, CreateCredentialException>
     ) {
-        val intent = packageManager.getLaunchIntentForPackage(packageName)?.apply {
-            putExtra("GSOFTPASS_ACTION", "CREATE_PASSKEY")
-        } ?: Intent()
-
-        val pendingIntent = PendingIntent.getActivity(
-            applicationContext,
-            1001,
-            intent,
-            PendingIntent.FLAG_MUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
-        )
-
-        val slice = android.app.slice.Slice.Builder(
-            android.net.Uri.parse("content://com.gsoftpass.app/create"),
-            android.app.slice.SliceSpec("CreateEntry", 1)
+        val slice = Slice.Builder(
+            Uri.parse("content://com.gsoftpass.app/create"),
+            SliceSpec("CreateEntry", 1)
         ).build()
 
         val createEntry = CreateEntry(slice)
@@ -45,7 +34,7 @@ class GSoftPassCredentialService : CredentialProviderService() {
         callback.onResult(response)
     }
 
-    override fun onBeginGetCredentialRequest(
+    override fun onBeginGetCredential(
         request: BeginGetCredentialRequest,
         cancellationSignal: CancellationSignal,
         callback: OutcomeReceiver<BeginGetCredentialResponse, GetCredentialException>
@@ -54,7 +43,7 @@ class GSoftPassCredentialService : CredentialProviderService() {
         callback.onResult(response)
     }
 
-    override fun onClearCredentialStateRequest(
+    override fun onClearCredentialState(
         request: ClearCredentialStateRequest,
         cancellationSignal: CancellationSignal,
         callback: OutcomeReceiver<Void?, ClearCredentialStateException>

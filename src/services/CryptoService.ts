@@ -3,10 +3,6 @@ import CryptoJS from 'crypto-js';
 import { PasswordGeneratorOptions } from '../types/vault';
 
 export class CryptoService {
-  /**
-   * Generador aleatorio criptográficamente seguro compatible con Android, iOS y Web
-   * que jamás lanza el crash "Native crypto module could not be used".
-   */
   private static getSecureRandomInt(max: number): number {
     if (max <= 1) return 0;
     try {
@@ -15,19 +11,13 @@ export class CryptoService {
         globalThis.crypto.getRandomValues(array);
         return array[0] % max;
       }
-    } catch {
-      // Fallback seguro si el entorno de React Native no expone WebCrypto
-    }
+    } catch {}
     const entropy = `${Date.now()}_${Math.random()}_${Math.random()}`;
     const hashHex = CryptoJS.SHA256(entropy).toString().substring(0, 8);
     const intVal = parseInt(hashHex, 16);
     return Math.abs(intVal) % max;
   }
 
-  /**
-   * Deriva una clave de 256 bits a partir de la Contraseña Maestra y el Correo
-   * usando PBKDF2-HMAC-SHA256 (Arquitectura Zero-Knowledge).
-   */
   static deriveMasterKey(masterPassword: string, email: string): string {
     const salt = CryptoJS.SHA256(email.trim().toLowerCase()).toString();
     const key = CryptoJS.PBKDF2(masterPassword, salt, {
@@ -38,16 +28,10 @@ export class CryptoService {
     return key.toString();
   }
 
-  /**
-   * Crea un hash de verificación para comprobar el login sin guardar jamás la contraseña maestra
-   */
   static createAuthHash(derivedKey: string, masterPassword: string): string {
     return CryptoJS.HmacSHA256(derivedKey, masterPassword).toString();
   }
 
-  /**
-   * Cifra toda la bóveda (JSON) con AES-256
-   */
   static encryptVault(data: any, derivedKey: string): string {
     const jsonString = JSON.stringify(data);
     const iv = CryptoJS.SHA256(`${derivedKey}_${Date.now()}_${Math.random()}`)
@@ -60,9 +44,6 @@ export class CryptoService {
     return `${iv}:${encrypted}`;
   }
 
-  /**
-   * Descifra la bóveda con AES-256 (Soporta formato nuevo con IV explícito y formato anterior)
-   */
   static decryptVault<T>(cipherText: string, derivedKey: string): T | null {
     try {
       if (cipherText.includes(':')) {
@@ -84,8 +65,72 @@ export class CryptoService {
   }
 
   /**
-   * Algoritmo generador de contraseñas de alta entropía sin crashes nativos
+   * 2FA (TOTP RFC 6238): Genera una semilla Base32 de 16 caracteres para Google/MS Authenticator
    */
+  static generateTOTPSecret(): string {
+    const base32Chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+    let secret = '';
+    for (let i = 0; i < 16; i++) {
+      secret += base32Chars[this.getSecureRandomInt(32)];
+    }
+    return secret;
+  }
+
+  private static base32ToHex(base32: string): string {
+    const base32Chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+    let bits = '';
+    let hex = '';
+    const clean = base32.replace(/=+$/, '').toUpperCase().replace(/[^A-Z2-7]/g, '');
+
+    for (let i = 0; i < clean.length; i++) {
+      const val = base32Chars.indexOf(clean.charAt(i));
+      bits += val.toString(2).padStart(5, '0');
+    }
+    for (let i = 0; i + 4 <= bits.length; i += 4) {
+      const chunk = bits.substring(i, i + 4);
+      hex += parseInt(chunk, 2).toString(16);
+    }
+    return hex;
+  }
+
+  /**
+   * Calcula el código TOTP de 6 dígitos para una ventana de tiempo de 30s
+   */
+  static generateTOTPCode(secretBase32: string, timeOffsetSteps = 0): string {
+    try {
+      const epoch = Math.floor(Date.now() / 1000);
+      const timeStep = Math.floor(epoch / 30) + timeOffsetSteps;
+      const timeHex = timeStep.toString(16).padStart(16, '0');
+      const keyHex = this.base32ToHex(secretBase32);
+
+      const hmac = CryptoJS.HmacSHA1(
+        CryptoJS.enc.Hex.parse(timeHex),
+        CryptoJS.enc.Hex.parse(keyHex)
+      ).toString(CryptoJS.enc.Hex);
+
+      const offset = parseInt(hmac.substring(hmac.length - 1), 16) * 2;
+      const binary =
+        parseInt(hmac.substring(offset, offset + 8), 16) & 0x7fffffff;
+      const otp = (binary % 1000000).toString().padStart(6, '0');
+      return otp;
+    } catch {
+      return '000000';
+    }
+  }
+
+  /**
+   * Verifica si el código 2FA ingresado por el usuario es válido (con margen de ±30 seg)
+   */
+  static verifyTOTPCode(secretBase32: string, userCode: string): boolean {
+    const cleanCode = userCode.trim();
+    if (cleanCode.length !== 6) return false;
+    return (
+      cleanCode === this.generateTOTPCode(secretBase32, -1) ||
+      cleanCode === this.generateTOTPCode(secretBase32, 0) ||
+      cleanCode === this.generateTOTPCode(secretBase32, 1)
+    );
+  }
+
   static generatePassword(options: PasswordGeneratorOptions): string {
     let lower = 'abcdefghijklmnopqrstuvwxyz';
     let upper = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
@@ -107,7 +152,6 @@ export class CryptoService {
 
     let charset = '';
     const mandatoryChars: string[] = [];
-
     const getRandomChar = (str: string) => str[this.getSecureRandomInt(str.length)];
 
     if (options.includeLowercase && lower.length > 0) {
@@ -127,9 +171,7 @@ export class CryptoService {
       mandatoryChars.push(getRandomChar(symbols));
     }
 
-    if (!charset) {
-      charset = lower + numbers;
-    }
+    if (!charset) charset = lower + numbers;
 
     const remainingLength = Math.max(0, options.length - mandatoryChars.length);
     const resultChars = [...mandatoryChars];

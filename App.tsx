@@ -1,5 +1,5 @@
 // App.tsx
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   SafeAreaView,
   View,
@@ -11,17 +11,19 @@ import {
   Linking,
   Platform,
   useWindowDimensions,
+  AppState,
 } from 'react-native';
 import { usePreventScreenCapture } from 'expo-screen-capture';
 import { AuthScreen } from './src/screens/AuthScreen';
 import { VaultDashboard } from './src/screens/VaultDashboard';
+import { SecuritySettingsModal } from './src/components/SecuritySettingsModal';
 import { Colors } from './src/theme/colors';
 import { CustomFolder, VaultItem } from './src/types/vault';
 import { CryptoService } from './src/services/CryptoService';
 import { StorageService } from './src/services/StorageService';
 import { FirebaseService } from './src/services/FirebaseService';
 import { LanguageCode, Translations } from './src/i18n/translations';
-import { LogOut, Shield, Trash2, AlertTriangle, Coffee } from 'lucide-react-native';
+import { LogOut, Shield, Trash2, AlertTriangle, Fingerprint } from 'lucide-react-native';
 
 const BUY_ME_A_COFFEE_URL = 'https://www.buymeacoffee.com/DearTony';
 
@@ -42,6 +44,56 @@ export default function App() {
   } | null>(null);
 
   const [deleteModalVisible, setDeleteModalVisible] = useState(false);
+  const [securityModalVisible, setSecurityModalVisible] = useState(false);
+
+  // Configuración de Auto-Lock por inactividad (3 minutos por defecto)
+  const [autoLockMinutes, setAutoLockMinutes] = useState<number>(3);
+  const lastActivityRef = useRef<number>(Date.now());
+
+  const resetInactivityTimer = () => {
+    lastActivityRef.current = Date.now();
+  };
+
+  useEffect(() => {
+    StorageService.getItem('autolock_minutes').then((saved) => {
+      if (saved) setAutoLockMinutes(Number(saved) || 3);
+    });
+  }, []);
+
+  // Monitoreo continuo de inactividad y paso a segundo plano en Android
+  useEffect(() => {
+    if (!session) return;
+    resetInactivityTimer();
+
+    const interval = setInterval(() => {
+      const elapsedMs = Date.now() - lastActivityRef.current;
+      if (elapsedMs >= autoLockMinutes * 60 * 1000) {
+        handleLogout();
+      }
+    }, 10000);
+
+    const sub = AppState.addEventListener('change', (nextState) => {
+      if (nextState === 'active') {
+        const elapsedMs = Date.now() - lastActivityRef.current;
+        if (elapsedMs >= autoLockMinutes * 60 * 1000) {
+          handleLogout();
+        }
+      } else {
+        lastActivityRef.current = Date.now();
+      }
+    });
+
+    return () => {
+      clearInterval(interval);
+      sub.remove();
+    };
+  }, [session, autoLockMinutes]);
+
+  const handleChangeAutoLock = async (minutes: number) => {
+    setAutoLockMinutes(minutes);
+    resetInactivityTimer();
+    await StorageService.setItem('autolock_minutes', String(minutes));
+  };
 
   const handleOpenCoffee = () => {
     Linking.openURL(BUY_ME_A_COFFEE_URL).catch(() => {});
@@ -52,6 +104,7 @@ export default function App() {
     updatedFolders: CustomFolder[]
   ) => {
     if (!session) return;
+    resetInactivityTimer();
     setSession({
       ...session,
       items: updatedItems,
@@ -86,6 +139,8 @@ export default function App() {
       await StorageService.removeItem(`${userStorageKey}_uid`);
       await StorageService.removeItem(`${userStorageKey}_hash`);
       await StorageService.removeItem(`${userStorageKey}_vault`);
+      await StorageService.removeItem(`${userStorageKey}_2fa_secret`);
+      await StorageService.removeItem('biometric_enabled_session');
     } finally {
       setDeleteModalVisible(false);
       setSession(null);
@@ -119,9 +174,7 @@ export default function App() {
             accessibilityLabel="Buy me a taco en Buy Me a Coffee"
           >
             <Text style={{ fontSize: 15 }}>🌮</Text>
-            <Text style={styles.coffeePillSubtleText}>
-              Buy me a taco
-            </Text>
+            <Text style={styles.coffeePillSubtleText}>Buy me a taco</Text>
           </TouchableOpacity>
         </View>
       </SafeAreaView>
@@ -129,10 +182,12 @@ export default function App() {
   }
 
   return (
-    <SafeAreaView style={styles.safeArea}>
+    <SafeAreaView
+      style={styles.safeArea}
+      onTouchStart={resetInactivityTimer}
+    >
       <StatusBar barStyle="light-content" backgroundColor={Colors.surface} translucent={false} />
 
-      {/* Header Responsivo: En móvil distribuye limpio sin amontonar */}
       <View style={styles.header}>
         <View style={styles.headerTopRow}>
           <View style={styles.brandRow}>
@@ -152,8 +207,18 @@ export default function App() {
               accessibilityRole="link"
               accessibilityLabel="Buy me a taco"
             >
-              <Text style={{ fontSize: 15 }}>🌮</Text>
+              <Text style={{ fontSize: 14 }}>🌮</Text>
               {!isMobile && <Text style={styles.coffeeHeaderText}>Buy me a taco</Text>}
+            </TouchableOpacity>
+
+            {/* Botón para configurar Huella/Rostro, Auto-Lock y 2FA */}
+            <TouchableOpacity
+              style={styles.securityHeaderBtn}
+              onPress={() => setSecurityModalVisible(true)}
+              accessibilityRole="button"
+              accessibilityLabel="Configurar Huella, Auto-Lock y 2FA"
+            >
+              <Fingerprint size={17} color={Colors.primary} />
             </TouchableOpacity>
 
             <TouchableOpacity
@@ -172,7 +237,7 @@ export default function App() {
               accessibilityLabel={t.lockVault}
             >
               <LogOut size={16} color={Colors.textSecondary} />
-              <Text style={styles.logoutText}>{t.lockVault}</Text>
+              {!isMobile && <Text style={styles.logoutText}>{t.lockVault}</Text>}
             </TouchableOpacity>
           </View>
         </View>
@@ -183,6 +248,17 @@ export default function App() {
         items={session.items}
         folders={session.folders}
         onUpdateVault={handleUpdateVault}
+      />
+
+      {/* Modal de Huella Digital, Tiempo de Inactividad y 2FA */}
+      <SecuritySettingsModal
+        visible={securityModalVisible}
+        onClose={() => setSecurityModalVisible(false)}
+        uid={session.uid}
+        email={session.email}
+        derivedKey={session.derivedKey}
+        autoLockMinutes={autoLockMinutes}
+        onChangeAutoLock={handleChangeAutoLock}
       />
 
       {/* Modal de Confirmación para Eliminar Cuenta */}
@@ -228,7 +304,6 @@ const styles = StyleSheet.create({
   safeArea: {
     flex: 1,
     backgroundColor: Colors.background,
-    // Separa automáticamente la app de la barra de estado/cámara en Android
     paddingTop: Platform.OS === 'android' ? (StatusBar.currentHeight || 28) + 6 : 0,
   },
   loginFooter: {
@@ -252,25 +327,8 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: '800',
   },
-  coffeeHeaderBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 6,
-    backgroundColor: '#5F7FFF',
-    borderWidth: 1,
-    borderColor: '#000000',
-    height: 38,
-    paddingHorizontal: 12,
-    borderRadius: 10,
-  },
-  coffeeHeaderText: {
-    color: '#FFFFFF',
-    fontSize: 12,
-    fontWeight: '800',
-  },
   header: {
-    paddingHorizontal: 16,
+    paddingHorizontal: 14,
     paddingVertical: 12,
     backgroundColor: Colors.surface,
     borderBottomWidth: 1,
@@ -284,25 +342,52 @@ const styles = StyleSheet.create({
   brandRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 10,
+    gap: 8,
     flex: 1,
-    marginRight: 8,
+    marginRight: 6,
   },
   headerTitle: {
     color: Colors.textPrimary,
-    fontSize: 18,
+    fontSize: 17,
     fontWeight: '800',
   },
   emailSubtitle: {
     color: Colors.primary,
     fontSize: 11,
     fontWeight: '600',
-    maxWidth: 170,
+    maxWidth: 150,
   },
   headerActions: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 8,
+    gap: 6,
+  },
+  coffeeHeaderBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 5,
+    backgroundColor: '#5F7FFF',
+    borderWidth: 1,
+    borderColor: '#000000',
+    height: 38,
+    paddingHorizontal: 10,
+    borderRadius: 10,
+  },
+  coffeeHeaderText: {
+    color: '#FFFFFF',
+    fontSize: 12,
+    fontWeight: '800',
+  },
+  securityHeaderBtn: {
+    width: 38,
+    height: 38,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: 10,
+    backgroundColor: 'rgba(6, 182, 212, 0.14)',
+    borderWidth: 1,
+    borderColor: Colors.primary,
   },
   deleteAccountBtn: {
     width: 38,
@@ -317,9 +402,10 @@ const styles = StyleSheet.create({
   logoutBtn: {
     flexDirection: 'row',
     alignItems: 'center',
+    justifyContent: 'center',
     height: 38,
     gap: 6,
-    paddingHorizontal: 12,
+    paddingHorizontal: 10,
     borderRadius: 10,
     backgroundColor: Colors.surfaceLight,
     borderWidth: 1,

@@ -84,7 +84,7 @@ Inspirado en los estándares de seguridad de grado empresarial de soluciones com
 
 | Dashboard Multiplataforma (Web y Móvil) | Bóveda Móvil y Generador de Contraseñas |
 | :---: | :---: |
-| <img src="./assets/feature-graphic.jpg" alt="Dashboard GSoftPass" width="460" /> | <img src="./assets/mobile-vault.jpg" alt="Bóveda Móvil" width="220" /> <img src="./assets/mobile-generator.jpg" alt="Generador" width="220" /> |
+| <img src="./assets/feature-graphic.jpeg" alt="Dashboard GSoftPass" width="460" /> | <img src="./assets/mobile-vault.jpeg" alt="Bóveda Móvil" width="220" /> <img src="./assets/mobile-generator.jpeg" alt="Generador" width="220" /> |
 
 ---
 
@@ -199,8 +199,8 @@ eas build -p android --profile production
 **GSoftPass** es un proyecto gratuito pensado para devolverle a los usuarios el control total de sus contraseñas sin suscripciones forzosas. Si te resulta útil, puedes apoyar su desarrollo continuo invitándome un café:
 
 <div align="center">
-  <a href="https://www.buymeacoffee.com/tu_usuario" target="_blank">
-    <img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" height="50" width="210" />
+  <a href="https://www.buymeacoffee.com/DearTony" target="_blank">
+    <img src="https://img.buymeacoffee.com/button-api/?text=Buy%20me%20a%20taco&emoji=%F0%9F%8C%AE&slug=DearTony&button_colour=5F7FFF&font_colour=ffffff&font_family=Bree&outline_colour=000000&coffee_colour=FFDD00" alt="Buy me a taco" height="50" />
   </a>
 </div>
 

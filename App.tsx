@@ -23,7 +23,7 @@ import { FirebaseService } from './src/services/FirebaseService';
 import { LanguageCode, Translations } from './src/i18n/translations';
 import { LogOut, Shield, Trash2, AlertTriangle, Coffee } from 'lucide-react-native';
 
-const BUY_ME_A_COFFEE_URL = 'https://www.buymeacoffee.com/tu_usuario';
+const BUY_ME_A_COFFEE_URL = 'https://www.buymeacoffee.com/DearTony';
 
 export default function App() {
   usePreventScreenCapture();
@@ -116,11 +116,11 @@ export default function App() {
             style={styles.coffeePillSubtle}
             onPress={handleOpenCoffee}
             accessibilityRole="link"
-            accessibilityLabel="Apoyar a GSoftPass en Buy Me a Coffee"
+            accessibilityLabel="Buy me a taco en Buy Me a Coffee"
           >
-            <Coffee size={14} color="#FFDD00" />
+            <Text style={{ fontSize: 15 }}>🌮</Text>
             <Text style={styles.coffeePillSubtleText}>
-              ¿Te gusta GSoftPass gratis? Invítame un café ☕
+              Buy me a taco
             </Text>
           </TouchableOpacity>
         </View>
@@ -150,10 +150,10 @@ export default function App() {
               style={styles.coffeeHeaderBtn}
               onPress={handleOpenCoffee}
               accessibilityRole="link"
-              accessibilityLabel="Buy Me a Coffee"
+              accessibilityLabel="Buy me a taco"
             >
-              <Coffee size={16} color="#FFDD00" />
-              {!isMobile && <Text style={styles.coffeeHeaderText}>Buy me a coffee</Text>}
+              <Text style={{ fontSize: 15 }}>🌮</Text>
+              {!isMobile && <Text style={styles.coffeeHeaderText}>Buy me a taco</Text>}
             </TouchableOpacity>
 
             <TouchableOpacity
@@ -240,17 +240,34 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
-    backgroundColor: 'rgba(255, 221, 0, 0.1)',
+    backgroundColor: '#5F7FFF',
     borderWidth: 1,
-    borderColor: 'rgba(255, 221, 0, 0.35)',
-    paddingVertical: 8,
-    paddingHorizontal: 16,
+    borderColor: '#000000',
+    paddingVertical: 9,
+    paddingHorizontal: 18,
     borderRadius: 20,
   },
   coffeePillSubtleText: {
-    color: '#FDE047',
+    color: '#FFFFFF',
+    fontSize: 13,
+    fontWeight: '800',
+  },
+  coffeeHeaderBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    backgroundColor: '#5F7FFF',
+    borderWidth: 1,
+    borderColor: '#000000',
+    height: 38,
+    paddingHorizontal: 12,
+    borderRadius: 10,
+  },
+  coffeeHeaderText: {
+    color: '#FFFFFF',
     fontSize: 12,
-    fontWeight: '700',
+    fontWeight: '800',
   },
   header: {
     paddingHorizontal: 16,
@@ -286,23 +303,6 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
-  },
-  coffeeHeaderBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 6,
-    backgroundColor: 'rgba(255, 221, 0, 0.12)',
-    borderWidth: 1,
-    borderColor: 'rgba(255, 221, 0, 0.4)',
-    height: 38,
-    paddingHorizontal: 10,
-    borderRadius: 10,
-  },
-  coffeeHeaderText: {
-    color: '#FFDD00',
-    fontSize: 12,
-    fontWeight: '800',
   },
   deleteAccountBtn: {
     width: 38,

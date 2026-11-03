@@ -80,11 +80,15 @@ Inspirado en los estándares de seguridad de grado empresarial de soluciones com
 
 ---
 
-## 🖼️ Galería y Diseño UX/UI
+## 🖼️ Galería y Ecosistema Multiplataforma
 
-| Dashboard Multiplataforma (Web y Móvil) | Bóveda Móvil y Generador de Contraseñas |
-| :---: | :---: |
-| <img src="./assets/feature-graphic.jpeg" alt="Dashboard GSoftPass" width="460" /> | <img src="./assets/mobile-vault.jpeg" alt="Bóveda Móvil" width="220" /> <img src="./assets/mobile-generator.jpeg" alt="Generador" width="220" /> |
+<div align="center">
+  <p><strong>1. Sincronización Zero-Knowledge entre Extensión Microsoft Edge, Web y Android</strong></p>
+  <img src="./assets/github-hero-banner.jpg" alt="Ecosistema Multiplataforma GSoftPass" width="100%" style="border-radius: 14px;" />
+  <br /><br />
+  <p><strong>2. Escáner OCR de Libretas Físicas con IA y Autocompletado Nativo + Passkeys</strong></p>
+  <img src="./assets/github-features-showcase.jpg" alt="Escáner OCR y Autocompletado Nativo" width="100%" style="border-radius: 14px;" />
+</div>
 
 ---
 

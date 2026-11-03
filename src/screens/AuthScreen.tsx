@@ -9,6 +9,7 @@ import {
   KeyboardAvoidingView,
   Platform,
   ActivityIndicator,
+  ScrollView,
 } from 'react-native';
 import {
   ShieldCheck,
@@ -20,6 +21,8 @@ import {
   Globe,
   Fingerprint,
   KeyRound,
+  CheckSquare,
+  Square,
 } from 'lucide-react-native';
 import * as LocalAuthentication from 'expo-local-authentication';
 import { getAuth, sendPasswordResetEmail } from 'firebase/auth';
@@ -50,6 +53,9 @@ const DEFAULT_FOLDERS: CustomFolder[] = [
   { id: 'finance', name: 'Bancos y Tarjetas', icon: 'CreditCard' },
 ];
 
+// 7 días en milisegundos para no pedir 2FA a cada rato en el mismo dispositivo
+const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
+
 export const AuthScreen: React.FC<AuthScreenProps> = ({
   lang,
   onChangeLang,
@@ -66,7 +72,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
   const [loading, setLoading] = useState(false);
   const [legalVisible, setLegalVisible] = useState(false);
 
-  // Estados de Biometría (Huella / Rostro) y 2FA
+  // Estados de Biometría y 2FA Inteligente (7 días de confianza)
   const [savedBioSession, setSavedBioSession] = useState<{
     uid: string;
     email: string;
@@ -81,6 +87,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
     secret: string;
   } | null>(null);
   const [totpCode, setTotpCode] = useState('');
+  const [remember2FADevice, setRemember2FADevice] = useState(true);
 
   const passwordInputRef = useRef<TextInput>(null);
   const confirmInputRef = useRef<TextInput>(null);
@@ -103,7 +110,11 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
     }
   };
 
-  // Desbloqueo con Huella Digital o Rostro (previamente habilitado por el usuario)
+  /**
+   * Desbloqueo con Huella / Rostro:
+   * Al autenticar con biometría física en un dispositivo ya vinculado,
+   * entra directo sin molestar pidiendo el código 2FA.
+   */
   const handleBiometricLogin = async () => {
     if (!savedBioSession) return;
     setErrorMsg('');
@@ -133,7 +144,13 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
         }
       }
 
-      await proceedOrRequire2FA(
+      // Renueva la confianza de 7 días en este dispositivo y entra directo
+      await StorageService.setItem(
+        `${userStorageKey}_2fa_trusted_until`,
+        String(Date.now() + SEVEN_DAYS_MS)
+      );
+
+      onAuthenticated(
         savedBioSession.uid,
         savedBioSession.email,
         savedBioSession.derivedKey,
@@ -145,6 +162,10 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
     }
   };
 
+  /**
+   * Verifica si la cuenta tiene 2FA activo Y si ya pasaron más de 7 días
+   * (o es un dispositivo nuevo donde aún no se ha verificado).
+   */
   const proceedOrRequire2FA = async (
     uid: string,
     cleanEmail: string,
@@ -155,24 +176,46 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
     const userStorageKey = `user_${cleanEmail.replace(/[^a-z0-9]/g, '_')}`;
     const saved2FASecret = await StorageService.getItem(`${userStorageKey}_2fa_secret`);
 
-    if (saved2FASecret) {
-      setPending2FASession({
-        uid,
-        email: cleanEmail,
-        derivedKey,
-        items,
-        folders,
-        secret: saved2FASecret,
-      });
-      setTotpCode('');
-    } else {
+    if (!saved2FASecret) {
       onAuthenticated(uid, cleanEmail, derivedKey, items, folders);
+      return;
     }
+
+    // Revisamos si este dispositivo ya fue verificado en los últimos 7 días
+    const trustedUntilRaw = await StorageService.getItem(
+      `${userStorageKey}_2fa_trusted_until`
+    );
+    const trustedUntil = trustedUntilRaw ? Number(trustedUntilRaw) : 0;
+
+    if (Date.now() < trustedUntil) {
+      // Dispositivo de confianza vigente: entra directo sin pedir código
+      onAuthenticated(uid, cleanEmail, derivedKey, items, folders);
+      return;
+    }
+
+    // Es un dispositivo nuevo o ya pasó 1 semana: solicitamos el código 2FA
+    setPending2FASession({
+      uid,
+      email: cleanEmail,
+      derivedKey,
+      items,
+      folders,
+      secret: saved2FASecret,
+    });
+    setTotpCode('');
   };
 
-  const handleVerify2FA = () => {
+  const handleVerify2FA = async () => {
     if (!pending2FASession) return;
     if (CryptoService.verifyTOTPCode(pending2FASession.secret, totpCode)) {
+      const userStorageKey = `user_${pending2FASession.email.replace(/[^a-z0-9]/g, '_')}`;
+      if (remember2FADevice) {
+        await StorageService.setItem(
+          `${userStorageKey}_2fa_trusted_until`,
+          String(Date.now() + SEVEN_DAYS_MS)
+        );
+      }
+
       onAuthenticated(
         pending2FASession.uid,
         pending2FASession.email,
@@ -310,251 +353,282 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
     }
   };
 
-  // Vista de Verificación de Segundo Factor (2FA) si la cuenta lo tiene activo
   if (pending2FASession) {
     return (
-      <KeyboardAvoidingView style={styles.container}>
-        <View style={styles.card}>
-          <View style={styles.logoContainer}>
-            <View style={styles.iconBadge}>
-              <KeyRound size={34} color={Colors.primary} />
+      <KeyboardAvoidingView style={styles.outerContainer}>
+        <ScrollView
+          contentContainerStyle={styles.scrollContent}
+          keyboardShouldPersistTaps="handled"
+          showsVerticalScrollIndicator={false}
+        >
+          <View style={styles.card}>
+            <View style={styles.logoContainer}>
+              <View style={styles.iconBadge}>
+                <KeyRound size={34} color={Colors.primary} />
+              </View>
+              <Text style={styles.brandTitle}>Verificación 2FA</Text>
+              <Text style={styles.brandSubtitle}>
+                Ingresa el código de 6 dígitos de tu autenticador para{' '}
+                {pending2FASession.email}
+              </Text>
             </View>
-            <Text style={styles.brandTitle}>Verificación 2FA</Text>
-            <Text style={styles.brandSubtitle}>
-              Ingresa el código de 6 dígitos generado por tu aplicación autenticadora para{' '}
-              {pending2FASession.email}
-            </Text>
+
+            {errorMsg ? (
+              <View style={styles.errorBox}>
+                <Text style={styles.errorText}>{errorMsg}</Text>
+              </View>
+            ) : null}
+
+            <TextInput
+              style={styles.totpInput}
+              placeholder="000000"
+              placeholderTextColor={Colors.textMuted}
+              keyboardType="number-pad"
+              maxLength={6}
+              value={totpCode}
+              onChangeText={setTotpCode}
+              returnKeyType="done"
+              onSubmitEditing={handleVerify2FA}
+            />
+
+            {/* Casilla para recordar este dispositivo durante 7 días */}
+            <TouchableOpacity
+              style={styles.rememberDeviceRow}
+              onPress={() => setRemember2FADevice(!remember2FADevice)}
+            >
+              {remember2FADevice ? (
+                <CheckSquare size={18} color={Colors.primary} />
+              ) : (
+                <Square size={18} color={Colors.textSecondary} />
+              )}
+              <Text style={styles.rememberDeviceText}>
+                Confiar en este dispositivo y no pedir código durante 7 días
+              </Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity style={styles.primaryButton} onPress={handleVerify2FA}>
+              <Text style={styles.primaryButtonText}>Verificar y Desbloquear</Text>
+              <ArrowRight size={18} color={Colors.background} />
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={styles.switchModeBtn}
+              onPress={() => {
+                setPending2FASession(null);
+                setErrorMsg('');
+              }}
+            >
+              <Text style={styles.switchModeText}>Volver al inicio de sesión</Text>
+            </TouchableOpacity>
           </View>
-
-          {errorMsg ? (
-            <View style={styles.errorBox}>
-              <Text style={styles.errorText}>{errorMsg}</Text>
-            </View>
-          ) : null}
-
-          <TextInput
-            style={styles.totpInput}
-            placeholder="000000"
-            placeholderTextColor={Colors.textMuted}
-            keyboardType="number-pad"
-            maxLength={6}
-            value={totpCode}
-            onChangeText={setTotpCode}
-            returnKeyType="done"
-            onSubmitEditing={handleVerify2FA}
-          />
-
-          <TouchableOpacity style={styles.primaryButton} onPress={handleVerify2FA}>
-            <Text style={styles.primaryButtonText}>Verificar y Desbloquear</Text>
-            <ArrowRight size={18} color={Colors.background} />
-          </TouchableOpacity>
-
-          <TouchableOpacity
-            style={styles.switchModeBtn}
-            onPress={() => {
-              setPending2FASession(null);
-              setErrorMsg('');
-            }}
-          >
-            <Text style={styles.switchModeText}>Volver al inicio de sesión</Text>
-          </TouchableOpacity>
-        </View>
+        </ScrollView>
       </KeyboardAvoidingView>
     );
   }
 
   return (
     <KeyboardAvoidingView
-      style={styles.container}
+      style={styles.outerContainer}
       behavior={Platform.OS === 'ios' ? 'padding' : undefined}
     >
-      <View style={styles.langBar} accessibilityRole="tablist">
-        <Globe size={15} color={Colors.primary} />
-        {(Object.keys(LANGUAGE_LABELS) as LanguageCode[]).map((code) => (
-          <TouchableOpacity
-            key={code}
-            style={[styles.langChip, lang === code && styles.langChipActive]}
-            onPress={() => onChangeLang(code)}
-            accessibilityRole="tab"
-          >
-            <Text style={[styles.langChipText, lang === code && styles.langChipTextActive]}>
-              {LANGUAGE_LABELS[code]}
-            </Text>
-          </TouchableOpacity>
-        ))}
-      </View>
-
-      <View style={styles.card}>
-        <View style={styles.logoContainer}>
-          <View style={styles.iconBadge}>
-            <ShieldCheck size={36} color={Colors.primary} />
-          </View>
-          <Text style={styles.brandTitle} accessibilityRole="header">
-            GSoftPass
-          </Text>
-          <Text style={styles.brandSubtitle}>
-            {isRegistering ? t.subtitleRegister : t.subtitleLogin}
-          </Text>
-        </View>
-
-        {errorMsg ? (
-          <View style={styles.errorBox} accessibilityLiveRegion="assertive">
-            <Text style={styles.errorText}>{errorMsg}</Text>
-          </View>
-        ) : null}
-
-        {successMsg ? (
-          <View style={styles.successBox} accessibilityLiveRegion="polite">
-            <Text style={styles.successText}>{successMsg}</Text>
-          </View>
-        ) : null}
-
-        <View style={styles.inputGroup}>
-          <Text style={styles.label}>{t.masterEmail}</Text>
-          <View style={styles.inputWrapper}>
-            <Mail size={18} color={Colors.textSecondary} />
-            <TextInput
-              style={styles.input}
-              placeholder="tu_correo@ejemplo.com"
-              placeholderTextColor={Colors.textMuted}
-              value={email}
-              onChangeText={setEmail}
-              autoCapitalize="none"
-              keyboardType="email-address"
-              returnKeyType="next"
-              blurOnSubmit={false}
-              onSubmitEditing={() => passwordInputRef.current?.focus()}
-            />
-          </View>
-        </View>
-
-        <View style={styles.inputGroup}>
-          <View style={styles.passwordLabelRow}>
-            <Text style={styles.label}>{t.masterPassword}</Text>
-            {!isRegistering && (
-              <TouchableOpacity onPress={handleForgotPassword}>
-                <Text style={styles.forgotText}>¿Olvidaste tu contraseña?</Text>
-              </TouchableOpacity>
-            )}
-          </View>
-          <View style={styles.inputWrapper}>
-            <Lock size={18} color={Colors.textSecondary} />
-            <TextInput
-              ref={passwordInputRef}
-              style={styles.input}
-              placeholder="••••••••••••"
-              placeholderTextColor={Colors.textMuted}
-              secureTextEntry={!showPassword}
-              value={masterPassword}
-              onChangeText={setMasterPassword}
-              autoCapitalize="none"
-              returnKeyType={isRegistering ? 'next' : 'done'}
-              onSubmitEditing={() => {
-                if (isRegistering) {
-                  confirmInputRef.current?.focus();
-                } else {
-                  handleSubmit();
-                }
-              }}
-            />
-            <TouchableOpacity onPress={() => setShowPassword(!showPassword)}>
-              {showPassword ? (
-                <EyeOff size={18} color={Colors.textSecondary} />
-              ) : (
-                <Eye size={18} color={Colors.textSecondary} />
-              )}
+      <ScrollView
+        contentContainerStyle={styles.scrollContent}
+        keyboardShouldPersistTaps="handled"
+        showsVerticalScrollIndicator={false}
+      >
+        {/* Barra de Selección de Idioma con espacio superior garantizado en MS Edge y Móvil */}
+        <View style={styles.langBar} accessibilityRole="tablist">
+          <Globe size={15} color={Colors.primary} />
+          {(Object.keys(LANGUAGE_LABELS) as LanguageCode[]).map((code) => (
+            <TouchableOpacity
+              key={code}
+              style={[styles.langChip, lang === code && styles.langChipActive]}
+              onPress={() => onChangeLang(code)}
+              accessibilityRole="tab"
+            >
+              <Text style={[styles.langChipText, lang === code && styles.langChipTextActive]}>
+                {LANGUAGE_LABELS[code]}
+              </Text>
             </TouchableOpacity>
-          </View>
+          ))}
         </View>
 
-        {isRegistering && (
+        <View style={styles.card}>
+          <View style={styles.logoContainer}>
+            <View style={styles.iconBadge}>
+              <ShieldCheck size={34} color={Colors.primary} />
+            </View>
+            <Text style={styles.brandTitle} accessibilityRole="header">
+              GSoftPass
+            </Text>
+            <Text style={styles.brandSubtitle}>
+              {isRegistering ? t.subtitleRegister : t.subtitleLogin}
+            </Text>
+          </View>
+
+          {errorMsg ? (
+            <View style={styles.errorBox} accessibilityLiveRegion="assertive">
+              <Text style={styles.errorText}>{errorMsg}</Text>
+            </View>
+          ) : null}
+
+          {successMsg ? (
+            <View style={styles.successBox} accessibilityLiveRegion="polite">
+              <Text style={styles.successText}>{successMsg}</Text>
+            </View>
+          ) : null}
+
           <View style={styles.inputGroup}>
-            <Text style={styles.label}>{t.confirmPassword}</Text>
+            <Text style={styles.label}>{t.masterEmail}</Text>
+            <View style={styles.inputWrapper}>
+              <Mail size={18} color={Colors.textSecondary} />
+              <TextInput
+                style={styles.input}
+                placeholder="tu_correo@ejemplo.com"
+                placeholderTextColor={Colors.textMuted}
+                value={email}
+                onChangeText={setEmail}
+                autoCapitalize="none"
+                keyboardType="email-address"
+                returnKeyType="next"
+                blurOnSubmit={false}
+                onSubmitEditing={() => passwordInputRef.current?.focus()}
+              />
+            </View>
+          </View>
+
+          <View style={styles.inputGroup}>
+            <View style={styles.passwordLabelRow}>
+              <Text style={styles.label}>{t.masterPassword}</Text>
+              {!isRegistering && (
+                <TouchableOpacity onPress={handleForgotPassword}>
+                  <Text style={styles.forgotText}>¿Olvidaste tu contraseña?</Text>
+                </TouchableOpacity>
+              )}
+            </View>
             <View style={styles.inputWrapper}>
               <Lock size={18} color={Colors.textSecondary} />
               <TextInput
-                ref={confirmInputRef}
+                ref={passwordInputRef}
                 style={styles.input}
                 placeholder="••••••••••••"
                 placeholderTextColor={Colors.textMuted}
                 secureTextEntry={!showPassword}
-                value={confirmPassword}
-                onChangeText={setConfirmPassword}
+                value={masterPassword}
+                onChangeText={setMasterPassword}
                 autoCapitalize="none"
-                returnKeyType="done"
-                onSubmitEditing={handleSubmit}
+                returnKeyType={isRegistering ? 'next' : 'done'}
+                onSubmitEditing={() => {
+                  if (isRegistering) {
+                    confirmInputRef.current?.focus();
+                  } else {
+                    handleSubmit();
+                  }
+                }}
               />
+              <TouchableOpacity onPress={() => setShowPassword(!showPassword)}>
+                {showPassword ? (
+                  <EyeOff size={18} color={Colors.textSecondary} />
+                ) : (
+                  <Eye size={18} color={Colors.textSecondary} />
+                )}
+              </TouchableOpacity>
             </View>
           </View>
-        )}
 
-        <TouchableOpacity
-          style={[styles.primaryButton, loading && { opacity: 0.7 }]}
-          onPress={handleSubmit}
-          disabled={loading}
-        >
-          {loading ? (
-            <ActivityIndicator color={Colors.background} />
-          ) : (
-            <>
-              <Text style={styles.primaryButtonText}>
-                {isRegistering ? t.createVaultBtn : t.unlockVaultBtn}
-              </Text>
-              <ArrowRight size={18} color={Colors.background} />
-            </>
+          {isRegistering && (
+            <View style={styles.inputGroup}>
+              <Text style={styles.label}>{t.confirmPassword}</Text>
+              <View style={styles.inputWrapper}>
+                <Lock size={18} color={Colors.textSecondary} />
+                <TextInput
+                  ref={confirmInputRef}
+                  style={styles.input}
+                  placeholder="••••••••••••"
+                  placeholderTextColor={Colors.textMuted}
+                  secureTextEntry={!showPassword}
+                  value={confirmPassword}
+                  onChangeText={setConfirmPassword}
+                  autoCapitalize="none"
+                  returnKeyType="done"
+                  onSubmitEditing={handleSubmit}
+                />
+              </View>
+            </View>
           )}
-        </TouchableOpacity>
 
-        {/* Botón de Desbloqueo Biométrico con Huella / Rostro (si fue habilitado previamente) */}
-        {!isRegistering && savedBioSession && (
           <TouchableOpacity
-            style={styles.biometricButton}
-            onPress={handleBiometricLogin}
-            accessibilityRole="button"
-            accessibilityLabel="Iniciar sesión con huella o rostro"
+            style={[styles.primaryButton, loading && { opacity: 0.7 }]}
+            onPress={handleSubmit}
+            disabled={loading}
           >
-            <Fingerprint size={20} color={Colors.primary} />
-            <Text style={styles.biometricButtonText}>
-              Entrar con Huella / Rostro
+            {loading ? (
+              <ActivityIndicator color={Colors.background} />
+            ) : (
+              <>
+                <Text style={styles.primaryButtonText}>
+                  {isRegistering ? t.createVaultBtn : t.unlockVaultBtn}
+                </Text>
+                <ArrowRight size={18} color={Colors.background} />
+              </>
+            )}
+          </TouchableOpacity>
+
+          {!isRegistering && savedBioSession && (
+            <TouchableOpacity
+              style={styles.biometricButton}
+              onPress={handleBiometricLogin}
+              accessibilityRole="button"
+              accessibilityLabel="Iniciar sesión con huella o rostro"
+            >
+              <Fingerprint size={20} color={Colors.primary} />
+              <Text style={styles.biometricButtonText}>
+                Entrar con Huella / Rostro
+              </Text>
+            </TouchableOpacity>
+          )}
+
+          <TouchableOpacity
+            style={styles.switchModeBtn}
+            onPress={() => {
+              setIsRegistering(!isRegistering);
+              setErrorMsg('');
+              setSuccessMsg('');
+            }}
+          >
+            <Text style={styles.switchModeText}>
+              {isRegistering ? t.switchToLogin : t.switchToRegister}
             </Text>
           </TouchableOpacity>
-        )}
 
-        <TouchableOpacity
-          style={styles.switchModeBtn}
-          onPress={() => {
-            setIsRegistering(!isRegistering);
-            setErrorMsg('');
-            setSuccessMsg('');
-          }}
-        >
-          <Text style={styles.switchModeText}>
-            {isRegistering ? t.switchToLogin : t.switchToRegister}
-          </Text>
-        </TouchableOpacity>
+          <TouchableOpacity
+            style={{ marginTop: 14, alignItems: 'center' }}
+            onPress={() => setLegalVisible(true)}
+          >
+            <Text style={{ color: Colors.textMuted, fontSize: 12, textDecorationLine: 'underline' }}>
+              {t.legalLink}
+            </Text>
+          </TouchableOpacity>
 
-        <TouchableOpacity
-          style={{ marginTop: 14, alignItems: 'center' }}
-          onPress={() => setLegalVisible(true)}
-        >
-          <Text style={{ color: Colors.textMuted, fontSize: 12, textDecorationLine: 'underline' }}>
-            {t.legalLink}
-          </Text>
-        </TouchableOpacity>
-
-        <LegalModal visible={legalVisible} onClose={() => setLegalVisible(false)} />
-      </View>
+          <LegalModal visible={legalVisible} onClose={() => setLegalVisible(false)} />
+        </View>
+      </ScrollView>
     </KeyboardAvoidingView>
   );
 };
 
 const styles = StyleSheet.create({
-  container: {
+  outerContainer: {
     flex: 1,
     backgroundColor: Colors.background,
+  },
+  scrollContent: {
+    flexGrow: 1,
     alignItems: 'center',
     justifyContent: 'center',
-    padding: 18,
+    paddingTop: 28,      // Espacio superior amplio para que la barra de idiomas se vea completa
+    paddingBottom: 24,
+    paddingHorizontal: 24, // Margen lateral holgado alrededor de la tarjeta
   },
   langBar: {
     flexDirection: 'row',
@@ -562,10 +636,12 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     gap: 6,
-    marginBottom: 14,
+    marginBottom: 16,
+    width: '100%',
+    maxWidth: 420,
   },
   langChip: {
-    paddingVertical: 5,
+    paddingVertical: 6,
     paddingHorizontal: 10,
     borderRadius: 8,
     backgroundColor: Colors.surface,
@@ -587,21 +663,21 @@ const styles = StyleSheet.create({
   },
   card: {
     width: '100%',
-    maxWidth: 420,
+    maxWidth: 400,
     backgroundColor: Colors.surface,
-    borderRadius: 20,
+    borderRadius: 22,
     padding: 24,
     borderWidth: 1,
     borderColor: Colors.border,
   },
   logoContainer: {
     alignItems: 'center',
-    marginBottom: 20,
+    marginBottom: 18,
   },
   iconBadge: {
-    width: 64,
-    height: 64,
-    borderRadius: 20,
+    width: 60,
+    height: 60,
+    borderRadius: 18,
     backgroundColor: 'rgba(6, 182, 212, 0.12)',
     alignItems: 'center',
     justifyContent: 'center',
@@ -610,7 +686,7 @@ const styles = StyleSheet.create({
     borderColor: 'rgba(6, 182, 212, 0.3)',
   },
   brandTitle: {
-    fontSize: 26,
+    fontSize: 25,
     fontWeight: '800',
     color: Colors.textPrimary,
     letterSpacing: 0.5,
@@ -695,6 +771,19 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: Colors.primary,
     marginBottom: 14,
+  },
+  rememberDeviceRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    marginBottom: 16,
+    paddingHorizontal: 4,
+  },
+  rememberDeviceText: {
+    color: Colors.textSecondary,
+    fontSize: 12,
+    flex: 1,
+    lineHeight: 17,
   },
   primaryButton: {
     backgroundColor: Colors.primary,

@@ -49,7 +49,7 @@ export const VaultDashboard: React.FC<VaultDashboardProps> = ({
   onUpdateVault,
 }) => {
   const { width } = useWindowDimensions();
-  const isMobile = width < 680;
+  const isCompact = width < 680;
   const searchInputRef = useRef<TextInput>(null);
 
   const [searchQuery, setSearchQuery] = useState('');
@@ -58,7 +58,6 @@ export const VaultDashboard: React.FC<VaultDashboardProps> = ({
   const [expandedEmails, setExpandedEmails] = useState<Record<string, boolean>>({});
   const [copiedId, setCopiedId] = useState<string | null>(null);
 
-  // Estados de Modales
   const [itemModalVisible, setItemModalVisible] = useState(false);
   const [editingItem, setEditingItem] = useState<VaultItem | null>(null);
   const [standaloneGenerator, setStandaloneGenerator] = useState(false);
@@ -196,142 +195,143 @@ export const VaultDashboard: React.FC<VaultDashboardProps> = ({
 
   return (
     <View style={styles.container}>
-      {/* SECCIÓN SUPERIOR RESPONSIVA: En celular separa el Buscador arriba y los Botones abajo */}
-      <View style={[styles.topWrapper, !isMobile && styles.topWrapperDesktop]}>
-        {/* 1. Barra de Búsqueda amplia y tocable en toda su área */}
-        <TouchableOpacity
-          activeOpacity={1}
-          style={[styles.searchBox, !isMobile && { flex: 1, marginBottom: 0 }]}
-          onPress={() => searchInputRef.current?.focus()}
-        >
-          <Search size={18} color={Colors.primary} />
-          <TextInput
-            ref={searchInputRef}
-            style={styles.searchInput}
-            placeholder="Buscar por correo, URL o nombre..."
-            placeholderTextColor={Colors.textMuted}
-            value={searchQuery}
-            onChangeText={setSearchQuery}
-            autoCapitalize="none"
-            returnKeyType="search"
-          />
-          {searchQuery.length > 0 && (
-            <TouchableOpacity onPress={() => setSearchQuery('')}>
-              <X size={18} color={Colors.textSecondary} />
+      {/* Panel de Control con espaciado interior cómodo */}
+      <View style={styles.controlsCard}>
+        <View style={[styles.topWrapper, !isCompact && styles.topWrapperDesktop]}>
+          <TouchableOpacity
+            activeOpacity={1}
+            style={[styles.searchBox, !isCompact && { flex: 1, marginBottom: 0 }]}
+            onPress={() => searchInputRef.current?.focus()}
+          >
+            <Search size={18} color={Colors.primary} />
+            <TextInput
+              ref={searchInputRef}
+              style={styles.searchInput}
+              placeholder="Buscar por correo, URL o nombre..."
+              placeholderTextColor={Colors.textMuted}
+              value={searchQuery}
+              onChangeText={setSearchQuery}
+              autoCapitalize="none"
+              returnKeyType="search"
+            />
+            {searchQuery.length > 0 && (
+              <TouchableOpacity onPress={() => setSearchQuery('')}>
+                <X size={18} color={Colors.textSecondary} />
+              </TouchableOpacity>
+            )}
+          </TouchableOpacity>
+
+          <View style={styles.actionButtonsRow}>
+            <TouchableOpacity
+              style={styles.toolBtn}
+              onPress={() => setStandaloneGenerator(true)}
+              accessibilityLabel="Abrir Generador de Contraseñas"
+            >
+              <Wand2 size={17} color={Colors.primary} />
+              {isCompact && <Text style={styles.toolBtnLabel}>Generar</Text>}
             </TouchableOpacity>
-          )}
-        </TouchableOpacity>
 
-        {/* 2. Fila de Botones de Herramientas y "+ Nueva Cuenta" sin amontonarse */}
-        <View style={styles.actionButtonsRow}>
-          <TouchableOpacity
-            style={styles.toolBtn}
-            onPress={() => setStandaloneGenerator(true)}
-            accessibilityLabel="Abrir Generador de Contraseñas"
+            <TouchableOpacity
+              style={styles.toolBtn}
+              onPress={() => setScannerVisible(true)}
+              accessibilityLabel="Escanear libreta"
+            >
+              <ScanLine size={17} color={Colors.primary} />
+              {isCompact && <Text style={styles.toolBtnLabel}>Escáner</Text>}
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={styles.toolBtn}
+              onPress={() => setAutofillModalVisible(true)}
+              accessibilityLabel="Configurar Autocompletado"
+            >
+              <Smartphone size={17} color={Colors.primary} />
+              {isCompact && <Text style={styles.toolBtnLabel}>Autofill</Text>}
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={styles.addBtn}
+              onPress={() => {
+                setEditingItem(null);
+                setItemModalVisible(true);
+              }}
+              accessibilityLabel="Crear Nueva Cuenta"
+            >
+              <Plus size={17} color={Colors.background} />
+              <Text style={styles.addBtnText}>Nueva</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+
+        {/* Filtros de Carpetas y Correo Maestro */}
+        <View style={styles.filtersContainer}>
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={styles.foldersScrollContent}
           >
-            <Wand2 size={18} color={Colors.primary} />
-            {isMobile && <Text style={styles.toolBtnLabel}>Generar</Text>}
-          </TouchableOpacity>
+            <TouchableOpacity
+              style={[styles.filterPill, selectedFolderId === 'ALL' && styles.filterPillActive]}
+              onPress={() => setSelectedFolderId('ALL')}
+            >
+              <Text
+                style={[
+                  styles.filterPillText,
+                  selectedFolderId === 'ALL' && styles.filterPillTextActive,
+                ]}
+              >
+                Todas ({items.length})
+              </Text>
+            </TouchableOpacity>
+
+            {folders.map((folder) => (
+              <TouchableOpacity
+                key={folder.id}
+                style={[
+                  styles.filterPill,
+                  selectedFolderId === folder.id && styles.filterPillActive,
+                ]}
+                onPress={() => setSelectedFolderId(folder.id)}
+              >
+                <Folder
+                  size={13}
+                  color={selectedFolderId === folder.id ? Colors.primary : Colors.textSecondary}
+                />
+                <Text
+                  style={[
+                    styles.filterPillText,
+                    selectedFolderId === folder.id && styles.filterPillTextActive,
+                  ]}
+                >
+                  {folder.name}
+                </Text>
+              </TouchableOpacity>
+            ))}
+          </ScrollView>
 
           <TouchableOpacity
-            style={styles.toolBtn}
-            onPress={() => setScannerVisible(true)}
-            accessibilityLabel="Escanear libreta"
+            style={[styles.groupToggleBtn, groupByMasterEmail && styles.groupToggleBtnActive]}
+            onPress={() => setGroupByMasterEmail(!groupByMasterEmail)}
           >
-            <ScanLine size={18} color={Colors.primary} />
-            {isMobile && <Text style={styles.toolBtnLabel}>Escáner</Text>}
-          </TouchableOpacity>
-
-          <TouchableOpacity
-            style={styles.toolBtn}
-            onPress={() => setAutofillModalVisible(true)}
-            accessibilityLabel="Configurar Autocompletado"
-          >
-            <Smartphone size={18} color={Colors.primary} />
-            {isMobile && <Text style={styles.toolBtnLabel}>Autofill</Text>}
-          </TouchableOpacity>
-
-          <TouchableOpacity
-            style={styles.addBtn}
-            onPress={() => {
-              setEditingItem(null);
-              setItemModalVisible(true);
-            }}
-            accessibilityLabel="Crear Nueva Cuenta"
-          >
-            <Plus size={18} color={Colors.background} />
-            <Text style={styles.addBtnText}>Nueva</Text>
+            <Layers size={15} color={groupByMasterEmail ? Colors.primary : Colors.textSecondary} />
+            <Text
+              style={[
+                styles.groupToggleText,
+                groupByMasterEmail && { color: Colors.primary, fontWeight: '700' },
+              ]}
+            >
+              Agrupar por Correo Maestro
+            </Text>
           </TouchableOpacity>
         </View>
       </View>
 
-      {/* FILTROS DE CARPETAS Y AGRUPACIÓN POR CORREO MAESTRO */}
-      <View style={styles.filtersContainer}>
-        <ScrollView
-          horizontal
-          showsHorizontalScrollIndicator={false}
-          contentContainerStyle={styles.foldersScrollContent}
-        >
-          <TouchableOpacity
-            style={[styles.filterPill, selectedFolderId === 'ALL' && styles.filterPillActive]}
-            onPress={() => setSelectedFolderId('ALL')}
-          >
-            <Text
-              style={[
-                styles.filterPillText,
-                selectedFolderId === 'ALL' && styles.filterPillTextActive,
-              ]}
-            >
-              Todas ({items.length})
-            </Text>
-          </TouchableOpacity>
-
-          {folders.map((folder) => (
-            <TouchableOpacity
-              key={folder.id}
-              style={[
-                styles.filterPill,
-                selectedFolderId === folder.id && styles.filterPillActive,
-              ]}
-              onPress={() => setSelectedFolderId(folder.id)}
-            >
-              <Folder
-                size={13}
-                color={selectedFolderId === folder.id ? Colors.primary : Colors.textSecondary}
-              />
-              <Text
-                style={[
-                  styles.filterPillText,
-                  selectedFolderId === folder.id && styles.filterPillTextActive,
-                ]}
-              >
-                {folder.name}
-              </Text>
-            </TouchableOpacity>
-          ))}
-        </ScrollView>
-
-        <TouchableOpacity
-          style={[styles.groupToggleBtn, groupByMasterEmail && styles.groupToggleBtnActive]}
-          onPress={() => setGroupByMasterEmail(!groupByMasterEmail)}
-        >
-          <Layers size={15} color={groupByMasterEmail ? Colors.primary : Colors.textSecondary} />
-          <Text
-            style={[
-              styles.groupToggleText,
-              groupByMasterEmail && { color: Colors.primary, fontWeight: '700' },
-            ]}
-          >
-            Agrupar por Correo Maestro
-          </Text>
-        </TouchableOpacity>
-      </View>
-
-      {/* LISTA DE CUENTAS DE LA BÓVEDA */}
+      {/* Lista de Cuentas con padding inferior generoso */}
       <ScrollView
         style={styles.vaultList}
-        contentContainerStyle={{ paddingBottom: 48 }}
+        contentContainerStyle={styles.vaultListContent}
         keyboardShouldPersistTaps="handled"
+        showsVerticalScrollIndicator={false}
       >
         {filteredItems.length === 0 ? (
           <View style={styles.emptyBox}>
@@ -378,7 +378,6 @@ export const VaultDashboard: React.FC<VaultDashboardProps> = ({
         )}
       </ScrollView>
 
-      {/* Modales */}
       <VaultItemModal
         visible={itemModalVisible}
         onClose={() => setItemModalVisible(false)}
@@ -421,8 +420,14 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: Colors.background,
-    paddingHorizontal: 14,
-    paddingTop: 12,
+  },
+  controlsCard: {
+    backgroundColor: Colors.surface,
+    borderRadius: 18,
+    padding: 14,
+    borderWidth: 1,
+    borderColor: Colors.border,
+    marginBottom: 14,
   },
   topWrapper: {
     marginBottom: 12,
@@ -436,10 +441,10 @@ const styles = StyleSheet.create({
     width: '100%',
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: Colors.surface,
+    backgroundColor: Colors.background,
     borderRadius: 12,
     paddingHorizontal: 14,
-    height: 48,
+    height: 46,
     borderWidth: 1,
     borderColor: Colors.border,
     marginBottom: 10,
@@ -459,10 +464,10 @@ const styles = StyleSheet.create({
   },
   toolBtn: {
     flex: 1,
-    height: 44,
-    paddingHorizontal: 10,
-    borderRadius: 12,
-    backgroundColor: Colors.surface,
+    height: 42,
+    paddingHorizontal: 8,
+    borderRadius: 11,
+    backgroundColor: Colors.background,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
@@ -476,15 +481,15 @@ const styles = StyleSheet.create({
     fontWeight: '700',
   },
   addBtn: {
-    flex: 1.2,
+    flex: 1.15,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
     gap: 4,
     backgroundColor: Colors.primary,
-    height: 44,
+    height: 42,
     paddingHorizontal: 12,
-    borderRadius: 12,
+    borderRadius: 11,
   },
   addBtnText: {
     color: Colors.background,
@@ -492,8 +497,7 @@ const styles = StyleSheet.create({
     fontSize: 13,
   },
   filtersContainer: {
-    marginBottom: 12,
-    gap: 8,
+    gap: 10,
   },
   foldersScrollContent: {
     paddingVertical: 2,
@@ -506,7 +510,7 @@ const styles = StyleSheet.create({
     paddingVertical: 7,
     paddingHorizontal: 13,
     borderRadius: 18,
-    backgroundColor: Colors.surface,
+    backgroundColor: Colors.background,
     borderWidth: 1,
     borderColor: Colors.border,
   },
@@ -531,7 +535,7 @@ const styles = StyleSheet.create({
     paddingVertical: 7,
     paddingHorizontal: 12,
     borderRadius: 10,
-    backgroundColor: Colors.surface,
+    backgroundColor: Colors.background,
     borderWidth: 1,
     borderColor: Colors.border,
   },
@@ -547,10 +551,13 @@ const styles = StyleSheet.create({
   vaultList: {
     flex: 1,
   },
+  vaultListContent: {
+    paddingBottom: 64,
+  },
   emailGroupSection: {
     marginBottom: 14,
     backgroundColor: Colors.surface,
-    borderRadius: 16,
+    borderRadius: 18,
     borderWidth: 1,
     borderColor: Colors.border,
     overflow: 'hidden',
@@ -559,8 +566,8 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingHorizontal: 14,
-    paddingVertical: 12,
+    paddingHorizontal: 16,
+    paddingVertical: 13,
     backgroundColor: Colors.surfaceLight,
   },
   emailHeaderLeft: {
@@ -588,13 +595,13 @@ const styles = StyleSheet.create({
     fontWeight: '800',
   },
   emailGroupBody: {
-    padding: 10,
+    padding: 12,
   },
   vaultCard: {
     flexDirection: 'row',
     alignItems: 'center',
     backgroundColor: Colors.background,
-    padding: 12,
+    padding: 14,
     borderRadius: 14,
     borderWidth: 1,
     borderColor: Colors.border,
@@ -677,6 +684,10 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     paddingVertical: 50,
     paddingHorizontal: 20,
+    backgroundColor: Colors.surface,
+    borderRadius: 18,
+    borderWidth: 1,
+    borderColor: Colors.border,
   },
   emptyTitle: {
     color: Colors.textPrimary,

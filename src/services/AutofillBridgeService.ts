@@ -1,84 +1,109 @@
 // src/services/AutofillBridgeService.ts
-import { Platform, Linking } from 'react-native';
+import { NativeModules, Platform } from 'react-native';
 import { VaultItem } from '../types/vault';
 import { StorageService } from './StorageService';
 
-export interface AutofillCandidate {
-  id: string;
-  name: string;
-  url: string;
-  username: string;
-  password?: string;
-  masterEmail?: string;
-  brandColor?: string;
+declare const chrome: any;
+
+const { GSoftPassAutofill } = NativeModules;
+
+export interface AutofillPreferences {
+  inlineAutofillEnabled: boolean;   // Mostrar sugerencias encima del teclado
+  dropdownAutofillEnabled: boolean; // Mostrar sugerencias en menú desplegable junto a los campos
 }
 
 export class AutofillBridgeService {
-  private static AUTOFILL_CACHE_KEY = 'autofill_quick_index';
+  static async getPreferences(): Promise<AutofillPreferences> {
+    const raw = await StorageService.getItem('gsoftpass_autofill_prefs');
+    if (raw) {
+      try {
+        return JSON.parse(raw);
+      } catch {}
+    }
+    return {
+      inlineAutofillEnabled: true,
+      dropdownAutofillEnabled: true,
+    };
+  }
+
+  static async savePreferences(prefs: AutofillPreferences, currentItems: VaultItem[]): Promise<void> {
+    await StorageService.setItem('gsoftpass_autofill_prefs', JSON.stringify(prefs));
+    await this.syncVaultWithSystemAutofill(currentItems);
+  }
+
+  static async isAndroidAutofillEnabled(): Promise<boolean> {
+    if (Platform.OS === 'android' && GSoftPassAutofill?.isAutofillServiceEnabled) {
+      try {
+        return await GSoftPassAutofill.isAutofillServiceEnabled();
+      } catch {
+        return false;
+      }
+    }
+    return false;
+  }
 
   /**
-   * Sincroniza las cuentas de tipo 'account' y 'passkey' con el índice rápido
-   * que consumen el AutofillService de Android y la Extensión de Edge.
+   * Sincroniza la bóveda tanto con la Extensión MS Edge como con el Servicio Nativo de Android
    */
   static async syncVaultWithSystemAutofill(items: VaultItem[]): Promise<void> {
-    const candidates: AutofillCandidate[] = items
-      .filter((item) => item.type === 'account' || item.type === 'passkey')
-      .map((item) => ({
-        id: item.id,
-        name: item.name,
-        url: (item.url || '').toLowerCase(),
-        username: item.username || item.masterEmail || '',
-        password: item.password || '',
-        masterEmail: item.masterEmail,
-        brandColor: item.brandColor,
+    const simplified = items
+      .filter((i) => i.type === 'account' || i.password || i.username)
+      .map((i) => ({
+        id: i.id,
+        name: i.name,
+        url: i.url || '',
+        username: i.username || i.masterEmail || '',
+        password: i.password || '',
+        masterEmail: i.masterEmail,
       }));
 
-    await StorageService.setItem(this.AUTOFILL_CACHE_KEY, JSON.stringify(candidates));
+    const jsonPayload = JSON.stringify(simplified);
+    await StorageService.setItem('autofill_synced_credentials', jsonPayload);
 
-    // Si corre como Extensión en Microsoft Edge, actualiza también chrome.storage.local
-    if (Platform.OS === 'web' && typeof window !== 'undefined') {
-      const chromeGlobal = (window as any).chrome;
-      if (chromeGlobal && chromeGlobal.storage && chromeGlobal.storage.local) {
-        chromeGlobal.storage.local.set({ gsoftpass_autofill_cache: candidates });
-      }
-    }
-  }
-
-  /**
-   * Busca cuentas coincidentes cuando el usuario toca un input en cualquier app o sitio web
-   */
-  static findMatchingAccounts(
-    items: VaultItem[],
-    appPackageOrUrl: string
-  ): VaultItem[] {
-    const query = appPackageOrUrl.trim().toLowerCase();
-    if (!query) return [];
-
-    return items.filter((item) => {
-      if (item.type !== 'account' && item.type !== 'passkey') return false;
-      const itemUrl = (item.url || '').toLowerCase();
-      const itemName = item.name.toLowerCase();
-      return (
-        itemUrl.includes(query) ||
-        query.includes(itemName) ||
-        itemName.includes(query.replace(/^com\./, '').split('.')[0])
-      );
-    });
-  }
-
-  /**
-   * Abre directamente la pantalla de Ajustes de Android -> "Servicio de Autocompletado"
-   * para que elijas GSoftPass en lugar de Samsung Pass o Google.
-   */
-  static async openAndroidAutofillSettings(): Promise<void> {
-    if (Platform.OS === 'android') {
+    // 1. Sincronizar con el Servicio Nativo de Android (SharedPreferences compartidas con Kotlin)
+    if (Platform.OS === 'android' && GSoftPassAutofill?.syncCredentials) {
       try {
-        await Linking.sendIntent('android.settings.REQUEST_SET_AUTOFILL_SERVICE', [
-          { key: 'package', value: 'package:com.gsoftpass.app' },
-        ]);
+        const prefs = await this.getPreferences();
+        await GSoftPassAutofill.syncCredentials(
+          jsonPayload,
+          prefs.inlineAutofillEnabled,
+          prefs.dropdownAutofillEnabled
+        );
+      } catch {}
+    }
+
+    // 2. Sincronizar con la extensión de Microsoft Edge
+    if (Platform.OS === 'web' && typeof chrome !== 'undefined' && chrome.storage?.local) {
+      chrome.storage.local.set({ gsoftpass_autofill_cache: simplified });
+    }
+  }
+
+  /**
+   * Abre directamente el selector de Android:
+   * "Elegir servicio preferido para guardar e introducir contraseñas, claves de acceso e información de autorrellenado"
+   */
+  static async openAndroidAutofillSettings(): Promise<boolean> {
+    if (Platform.OS !== 'android') return false;
+    if (GSoftPassAutofill?.openSystemAutofillSettings) {
+      return await GSoftPassAutofill.openSystemAutofillSettings();
+    }
+    return false;
+  }
+
+  /**
+   * Recupera las cuentas que el usuario haya guardado desde el Pop-up inferior de Android
+   */
+  static async consumeAndroidSavedAccounts(): Promise<
+    Array<{ name: string; url: string; username: string; password: string }>
+  > {
+    if (Platform.OS === 'android' && GSoftPassAutofill?.consumePendingSavedCredentials) {
+      try {
+        const jsonStr = await GSoftPassAutofill.consumePendingSavedCredentials();
+        return JSON.parse(jsonStr || '[]');
       } catch {
-        await Linking.openSettings();
+        return [];
       }
     }
+    return [];
   }
 }

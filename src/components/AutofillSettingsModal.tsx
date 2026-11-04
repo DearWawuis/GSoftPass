@@ -6,27 +6,30 @@ import {
   Text,
   TouchableOpacity,
   StyleSheet,
+  Switch,
   Platform,
+  ScrollView,
+  AppState,
 } from 'react-native';
 import {
   X,
   Smartphone,
-  ShieldCheck,
-  ExternalLink,
+  Keyboard,
+  ListFilter,
   CheckCircle2,
-  RefreshCw,
-  Globe,
+  ExternalLink,
+  ShieldCheck,
 } from 'lucide-react-native';
 import { Colors } from '../theme/colors';
 import { VaultItem } from '../types/vault';
-import { AutofillBridgeService } from '../services/AutofillBridgeService';
+import { AutofillBridgeService, AutofillPreferences } from '../services/AutofillBridgeService';
 
 interface AutofillSettingsModalProps {
   visible: boolean;
   onClose: () => void;
   items: VaultItem[];
   masterEmail: string;
-  onSaveNewCapturedAccount?: (newItem: VaultItem) => void;
+  onSaveNewCapturedAccount: (item: VaultItem) => void;
 }
 
 export const AutofillSettingsModal: React.FC<AutofillSettingsModalProps> = ({
@@ -34,90 +37,146 @@ export const AutofillSettingsModal: React.FC<AutofillSettingsModalProps> = ({
   onClose,
   items,
 }) => {
-  const [syncing, setSyncing] = useState(false);
-  const [lastSyncCount, setLastSyncCount] = useState(0);
+  const [serviceActive, setServiceActive] = useState(false);
+  const [prefs, setPrefs] = useState<AutofillPreferences>({
+    inlineAutofillEnabled: true,
+    dropdownAutofillEnabled: true,
+  });
 
-  const accountItemsCount = items.filter(
-    (i) => i.type === 'account' || i.type === 'passkey'
-  ).length;
+  const refreshStatus = async () => {
+    const isEnabled = await AutofillBridgeService.isAndroidAutofillEnabled();
+    setServiceActive(isEnabled);
+    const savedPrefs = await AutofillBridgeService.getPreferences();
+    setPrefs(savedPrefs);
+    await AutofillBridgeService.syncVaultWithSystemAutofill(items);
+  };
 
   useEffect(() => {
     if (visible) {
-      handleForceSync();
+      refreshStatus();
     }
   }, [visible, items]);
 
-  const handleForceSync = async () => {
-    setSyncing(true);
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (state) => {
+      if (state === 'active' && visible) {
+        refreshStatus();
+      }
+    });
+    return () => sub.remove();
+  }, [visible]);
+
+  const handleActivateAutofill = async () => {
     await AutofillBridgeService.syncVaultWithSystemAutofill(items);
-    setLastSyncCount(accountItemsCount);
-    setTimeout(() => setSyncing(false), 400);
+    await AutofillBridgeService.openAndroidAutofillSettings();
+  };
+
+  const handleToggleOption = async (key: keyof AutofillPreferences, value: boolean) => {
+    const updated = { ...prefs, [key]: value };
+    setPrefs(updated);
+    await AutofillBridgeService.savePreferences(updated, items);
   };
 
   return (
-    <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
+    <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
       <View style={styles.overlay}>
         <View style={styles.card}>
           <View style={styles.header}>
             <View style={styles.titleRow}>
               <Smartphone size={22} color={Colors.primary} />
-              <Text style={styles.title}>Servicio de Autocompletado</Text>
+              <Text style={styles.title}>Configuración de Autocompletar</Text>
             </View>
             <TouchableOpacity onPress={onClose}>
               <X size={22} color={Colors.textSecondary} />
             </TouchableOpacity>
           </View>
 
-          <View style={styles.statusBox}>
-            <CheckCircle2 size={22} color={Colors.success} />
-            <View style={{ flex: 1 }}>
-              <Text style={styles.statusTitle}>
-                Índice de Autocompletado Sincronizado
-              </Text>
-              <Text style={styles.statusSub}>
-                {lastSyncCount} cuentas listas para autocompletar en Android y Microsoft Edge.
+          <ScrollView showsVerticalScrollIndicator={false}>
+            {/* OPCIÓN 1 DE LASTPASS: Activar Autocompletar */}
+            <View style={styles.optionCard}>
+              <View style={styles.optionRow}>
+                <View style={styles.optionTextCol}>
+                  <View style={styles.badgeTitleRow}>
+                    <Text style={styles.optionTitle}>Activar Autocompletar</Text>
+                    {serviceActive && (
+                      <View style={styles.activeBadge}>
+                        <CheckCircle2 size={12} color={Colors.success} />
+                        <Text style={styles.activeBadgeText}>Activo</Text>
+                      </View>
+                    )}
+                  </View>
+                  <Text style={styles.optionDesc}>
+                    Abre la configuración de tu celular para escoger a GSoftPass como el servicio
+                    preferido para guardar e introducir contraseñas, claves de acceso e información
+                    de autorrellenado.
+                  </Text>
+                </View>
+              </View>
+
+              <TouchableOpacity
+                style={styles.primaryActionBtn}
+                onPress={handleActivateAutofill}
+              >
+                <ShieldCheck size={18} color={Colors.background} />
+                <Text style={styles.primaryActionBtnText}>
+                  {serviceActive
+                    ? 'Cambiar o Verificar Servicio Preferido'
+                    : 'Activar Autocompletar en Android'}
+                </Text>
+                <ExternalLink size={15} color={Colors.background} />
+              </TouchableOpacity>
+            </View>
+
+            {/* OPCIÓN 2 DE LASTPASS: Usar autocompletar en línea (Encima del teclado) */}
+            <View style={styles.optionCard}>
+              <View style={styles.optionRow}>
+                <View style={styles.iconCircle}>
+                  <Keyboard size={20} color={Colors.primary} />
+                </View>
+                <View style={styles.optionTextCol}>
+                  <Text style={styles.optionTitle}>Usar autocompletar en línea</Text>
+                  <Text style={styles.optionDesc}>
+                    Para mostrar las sugerencias de autocompletar encima del teclado (compatible con
+                    Gboard, Samsung Keyboard y SwiftKey en Android 11+).
+                  </Text>
+                </View>
+                <Switch
+                  value={prefs.inlineAutofillEnabled}
+                  onValueChange={(v) => handleToggleOption('inlineAutofillEnabled', v)}
+                  trackColor={{ false: Colors.surfaceLight, true: Colors.primary }}
+                />
+              </View>
+            </View>
+
+            {/* OPCIÓN 3 DE LASTPASS: Usar menú desplegable (Junto a los campos) */}
+            <View style={styles.optionCard}>
+              <View style={styles.optionRow}>
+                <View style={styles.iconCircle}>
+                  <ListFilter size={20} color={Colors.accent} />
+                </View>
+                <View style={styles.optionTextCol}>
+                  <Text style={styles.optionTitle}>Usar menú desplegable</Text>
+                  <Text style={styles.optionDesc}>
+                    Para mostrar las sugerencias de autocompletar en un menú desplegable junto a los
+                    campos de usuario y contraseña en aplicaciones como Twitch, redes sociales y
+                    navegadores.
+                  </Text>
+                </View>
+                <Switch
+                  value={prefs.dropdownAutofillEnabled}
+                  onValueChange={(v) => handleToggleOption('dropdownAutofillEnabled', v)}
+                  trackColor={{ false: Colors.surfaceLight, true: Colors.primary }}
+                />
+              </View>
+            </View>
+
+            <View style={styles.syncStatusBox}>
+              <Text style={styles.syncStatusText}>
+                ✓ {items.length} cuentas sincronizadas con el motor de autorrellenado y el pop-up
+                inferior de guardado automático.
               </Text>
             </View>
-            <TouchableOpacity style={styles.syncBtn} onPress={handleForceSync}>
-              <RefreshCw size={16} color={Colors.primary} />
-            </TouchableOpacity>
-          </View>
-
-          {/* Configuración Nativa en Android */}
-          <View style={styles.sectionCard}>
-            <View style={styles.sectionHeader}>
-              <ShieldCheck size={18} color={Colors.primary} />
-              <Text style={styles.sectionTitle}>1. Autocompletado Nativo en Android</Text>
-            </View>
-            <Text style={styles.sectionDesc}>
-              Selecciona a GSoftPass como tu servicio predeterminado en los ajustes de Android.
-              Al iniciar sesión o crear una cuenta en cualquier aplicación, Android mostrará la
-              sugerencia sobre tu teclado y el diálogo para guardar contraseñas nuevas.
-            </Text>
-
-            <TouchableOpacity
-              style={styles.primaryActionBtn}
-              onPress={() => AutofillBridgeService.openAndroidAutofillSettings()}
-            >
-              <Text style={styles.primaryActionText}>
-                Abrir Ajustes de Autocompletado de Android
-              </Text>
-              <ExternalLink size={16} color={Colors.background} />
-            </TouchableOpacity>
-          </View>
-
-          {/* Estado en Extensión Microsoft Edge */}
-          <View style={styles.sectionCard}>
-            <View style={styles.sectionHeader}>
-              <Globe size={18} color={Colors.accent} />
-              <Text style={styles.sectionTitle}>2. Extensión para Microsoft Edge</Text>
-            </View>
-            <Text style={styles.sectionDesc}>
-              {Platform.OS === 'web'
-                ? 'El motor web de GSoftPass está activo. Las cuentas de tu bóveda se sincronizan automáticamente con el detector de formularios del navegador.'
-                : 'Inicia sesión con tu misma cuenta en la extensión de Microsoft Edge para sincronizar tus cuentas en tu PC.'}
-            </Text>
-          </View>
+          </ScrollView>
         </View>
       </View>
     </Modal>
@@ -127,7 +186,7 @@ export const AutofillSettingsModal: React.FC<AutofillSettingsModalProps> = ({
 const styles = StyleSheet.create({
   overlay: {
     flex: 1,
-    backgroundColor: 'rgba(5, 8, 17, 0.86)',
+    backgroundColor: 'rgba(5, 8, 17, 0.88)',
     alignItems: 'center',
     justifyContent: 'center',
     padding: 16,
@@ -135,9 +194,10 @@ const styles = StyleSheet.create({
   card: {
     width: '100%',
     maxWidth: 480,
+    maxHeight: '90%',
     backgroundColor: Colors.surface,
     borderRadius: 22,
-    padding: 22,
+    padding: 20,
     borderWidth: 1,
     borderColor: Colors.border,
   },
@@ -150,40 +210,15 @@ const styles = StyleSheet.create({
   titleRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 10,
+    gap: 8,
+    flex: 1,
   },
   title: {
     color: Colors.textPrimary,
-    fontSize: 18,
+    fontSize: 17,
     fontWeight: '800',
   },
-  statusBox: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
-    backgroundColor: 'rgba(16, 185, 129, 0.1)',
-    borderWidth: 1,
-    borderColor: Colors.success,
-    padding: 14,
-    borderRadius: 14,
-    marginBottom: 16,
-  },
-  statusTitle: {
-    color: Colors.textPrimary,
-    fontWeight: '700',
-    fontSize: 14,
-  },
-  statusSub: {
-    color: Colors.textSecondary,
-    fontSize: 12,
-    marginTop: 2,
-  },
-  syncBtn: {
-    padding: 8,
-    backgroundColor: Colors.surfaceLight,
-    borderRadius: 10,
-  },
-  sectionCard: {
+  optionCard: {
     backgroundColor: Colors.background,
     borderRadius: 16,
     padding: 16,
@@ -191,36 +226,82 @@ const styles = StyleSheet.create({
     borderColor: Colors.border,
     marginBottom: 12,
   },
-  sectionHeader: {
+  optionRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 12,
+  },
+  iconCircle: {
+    width: 40,
+    height: 40,
+    borderRadius: 12,
+    backgroundColor: Colors.surfaceLight,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  optionTextCol: {
+    flex: 1,
+  },
+  badgeTitleRow: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
-    marginBottom: 8,
+    marginBottom: 4,
   },
-  sectionTitle: {
+  optionTitle: {
     color: Colors.textPrimary,
-    fontWeight: '700',
     fontSize: 15,
+    fontWeight: '700',
+    marginBottom: 4,
   },
-  sectionDesc: {
+  optionDesc: {
     color: Colors.textSecondary,
-    fontSize: 13,
-    lineHeight: 19,
-    marginBottom: 14,
+    fontSize: 12,
+    lineHeight: 18,
+  },
+  activeBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    backgroundColor: 'rgba(16, 185, 129, 0.15)',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 8,
+  },
+  activeBadgeText: {
+    color: Colors.success,
+    fontSize: 11,
+    fontWeight: '700',
   },
   primaryActionBtn: {
+    marginTop: 14,
     backgroundColor: Colors.primary,
     paddingVertical: 13,
-    paddingHorizontal: 16,
+    paddingHorizontal: 14,
     borderRadius: 12,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
     gap: 8,
   },
-  primaryActionText: {
+  primaryActionBtnText: {
     color: Colors.background,
     fontWeight: '800',
-    fontSize: 14,
+    fontSize: 13,
+  },
+  syncStatusBox: {
+    marginTop: 4,
+    padding: 12,
+    borderRadius: 12,
+    backgroundColor: 'rgba(6, 182, 212, 0.1)',
+    borderWidth: 1,
+    borderColor: 'rgba(6, 182, 212, 0.3)',
+  },
+  syncStatusText: {
+    color: Colors.primary,
+    fontSize: 12,
+    fontWeight: '600',
+    textAlign: 'center',
   },
 });

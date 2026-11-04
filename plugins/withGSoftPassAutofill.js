@@ -1,5 +1,5 @@
 // plugins/withGSoftPassAutofill.js
-const { withAndroidManifest, withDangerousMod } = require('@expo/config-plugins');
+const { withAndroidManifest, withDangerousMod, withMainApplication } = require('@expo/config-plugins');
 const fs = require('fs');
 const path = require('path');
 
@@ -8,13 +8,12 @@ function withAutofillAndPasskeysManifest(config) {
     const mainApplication = config.modResults.manifest.application[0];
     if (!mainApplication.service) mainApplication.service = [];
 
-    // 1. Servicio de Autocompletado (Contraseñas)
     const autofillServiceName = '.autofill.GSoftPassAutofillService';
     if (!mainApplication.service.some((s) => s.$['android:name'] === autofillServiceName)) {
       mainApplication.service.push({
         $: {
           'android:name': autofillServiceName,
-          'android:label': 'GSoftPass Autocompletado',
+          'android:label': 'GSoftPass',
           'android:permission': 'android.permission.BIND_AUTOFILL_SERVICE',
           'android:exported': 'true',
         },
@@ -27,7 +26,6 @@ function withAutofillAndPasskeysManifest(config) {
       });
     }
 
-    // 2. Servicio de Claves de Acceso / Passkeys (Android 14+)
     const passkeyServiceName = '.autofill.GSoftPassCredentialService';
     if (!mainApplication.service.some((s) => s.$['android:name'] === passkeyServiceName)) {
       mainApplication.service.push({
@@ -55,6 +53,29 @@ function withAutofillAndPasskeysManifest(config) {
   });
 }
 
+function withAutofillMainApplication(config) {
+  return withMainApplication(config, (config) => {
+    let contents = config.modResults.contents;
+
+    if (!contents.includes('com.gsoftpass.app.autofill.GSoftPassAutofillPackage')) {
+      contents = contents.replace(
+        'import com.facebook.react.PackageList',
+        'import com.facebook.react.PackageList\nimport com.gsoftpass.app.autofill.GSoftPassAutofillPackage'
+      );
+    }
+
+    if (!contents.includes('GSoftPassAutofillPackage()')) {
+      contents = contents.replace(
+        'PackageList(this).packages.apply {',
+        'PackageList(this).packages.apply {\n              add(GSoftPassAutofillPackage())'
+      );
+    }
+
+    config.modResults.contents = contents;
+    return config;
+  });
+}
+
 function withAutofillNativeFiles(config) {
   return withDangerousMod(config, [
     'android',
@@ -71,7 +92,12 @@ function withAutofillNativeFiles(config) {
 
       const ktDestDir = path.join(platformRoot, 'app/src/main/java/com/gsoftpass/app/autofill');
       fs.mkdirSync(ktDestDir, { recursive: true });
-      ['GSoftPassAutofillService.kt', 'GSoftPassCredentialService.kt'].forEach((file) => {
+      [
+        'GSoftPassAutofillService.kt',
+        'GSoftPassCredentialService.kt',
+        'GSoftPassAutofillModule.kt',
+        'GSoftPassAutofillPackage.kt',
+      ].forEach((file) => {
         const src = path.join(projectRoot, 'native-android', file);
         if (fs.existsSync(src)) fs.copyFileSync(src, path.join(ktDestDir, file));
       });
@@ -83,6 +109,7 @@ function withAutofillNativeFiles(config) {
 
 module.exports = function withGSoftPassAutofill(config) {
   config = withAutofillAndPasskeysManifest(config);
+  config = withAutofillMainApplication(config);
   config = withAutofillNativeFiles(config);
   return config;
 };

@@ -23,14 +23,16 @@ import { CustomFolder, VaultItem } from './src/types/vault';
 import { CryptoService } from './src/services/CryptoService';
 import { StorageService } from './src/services/StorageService';
 import { FirebaseService } from './src/services/FirebaseService';
+import { AutofillBridgeService } from './src/services/AutofillBridgeService';
+import { IconAIService } from './src/services/IconAIService';
 import { LanguageCode, Translations } from './src/i18n/translations';
 import { LogOut, Shield, Trash2, AlertTriangle, Fingerprint } from 'lucide-react-native';
 
 const BUY_ME_A_COFFEE_URL = 'https://www.buymeacoffee.com/DearTony';
 
-// Duración de sesión en la Extensión MS Edge / Web: 72 horas (3 días)
-const WEB_SESSION_TTL_MS = 72 * 60 * 60 * 1000;
-const WEB_PERSIST_KEY = 'web_extension_active_session_72h';
+// Duración de sesión activa tanto en Android como en la Extensión MS Edge: 1 MES (30 días)
+const SESSION_ONE_MONTH_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+const PERSISTENT_SESSION_KEY = 'gsoftpass_active_session_30d';
 
 const DEFAULT_FOLDERS: CustomFolder[] = [
   { id: 'games', name: 'Juegos', icon: 'Gamepad2' },
@@ -43,7 +45,7 @@ export default function App() {
   const { width } = useWindowDimensions();
   const isMobile = width < 640;
 
-  const [restoringSession, setRestoringSession] = useState(Platform.OS === 'web');
+  const [restoringSession, setRestoringSession] = useState(true);
   const [lang, setLang] = useState<LanguageCode>('es');
   const t = Translations[lang];
 
@@ -57,16 +59,12 @@ export default function App() {
 
   const [deleteModalVisible, setDeleteModalVisible] = useState(false);
   const [securityModalVisible, setSecurityModalVisible] = useState(false);
+  const [autoLockMinutes, setAutoLockMinutes] = useState<number>(43200); // 30 días en minutos
 
-  // Auto-Lock en móvil (por defecto 5 min); en Extensión Web dura 72 horas
-  const [autoLockMinutes, setAutoLockMinutes] = useState<number>(5);
-  const lastActivityRef = useRef<number>(Date.now());
+  const sessionRef = useRef(session);
+  sessionRef.current = session;
 
-  const resetInactivityTimer = () => {
-    lastActivityRef.current = Date.now();
-  };
-
-  // 1. Configurar estilos del Pop-up de MS Edge y restaurar sesión de 72 horas si existe
+  // 1. Al abrir la app (en Android o en MS Edge), restaura la sesión de 1 mes automáticamente
   useEffect(() => {
     if (Platform.OS === 'web' && typeof document !== 'undefined') {
       const style = document.createElement('style');
@@ -83,15 +81,16 @@ export default function App() {
         }
       `;
       document.head.appendChild(style);
-      restoreWebExtensionSession();
     } else {
       ScreenCapture.preventScreenCaptureAsync().catch(() => {});
     }
+
+    restorePersistentOneMonthSession();
   }, []);
 
-  const restoreWebExtensionSession = async () => {
+  const restorePersistentOneMonthSession = async () => {
     try {
-      const savedRaw = await StorageService.getItem(WEB_PERSIST_KEY);
+      const savedRaw = await StorageService.getItem(PERSISTENT_SESSION_KEY);
       if (!savedRaw) {
         setRestoringSession(false);
         return;
@@ -99,8 +98,8 @@ export default function App() {
 
       const parsed = JSON.parse(savedRaw);
       if (!parsed.expiresAt || Date.now() > parsed.expiresAt) {
-        // Ya pasaron las 72 horas: limpiamos y pedimos login
-        await StorageService.removeItem(WEB_PERSIST_KEY);
+        // Expiró el mes completo: limpiamos y pedimos login
+        await StorageService.removeItem(PERSISTENT_SESSION_KEY);
         setRestoringSession(false);
         return;
       }
@@ -128,12 +127,56 @@ export default function App() {
         items,
         folders,
       });
+
+      await AutofillBridgeService.syncVaultWithSystemAutofill(items);
     } catch {
-      await StorageService.removeItem(WEB_PERSIST_KEY);
+      await StorageService.removeItem(PERSISTENT_SESSION_KEY);
     } finally {
       setRestoringSession(false);
     }
   };
+
+  // 2. Importar automáticamente las contraseñas que el usuario guarde desde el Pop-up inferior de Android
+  useEffect(() => {
+    if (Platform.OS !== 'android' || !session) return;
+
+    const checkPendingAndroidSaves = async () => {
+      const current = sessionRef.current;
+      if (!current) return;
+      const pending = await AutofillBridgeService.consumeAndroidSavedAccounts();
+      if (pending.length > 0) {
+        const newVaultItems: VaultItem[] = pending.map((p) => {
+          const brand = IconAIService.predictBrandMetadata(p.name, p.url);
+          return {
+            id: `autofill_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+            type: 'account',
+            name: p.name || 'Cuenta Guardada',
+            url: p.url || '',
+            username: p.username || current.email,
+            password: p.password || '',
+            masterEmail: current.email,
+            folderId: brand.suggestedFolderId || 'social',
+            iconUrl: brand.iconUrl,
+            brandColor: brand.brandColor,
+            createdAt: Date.now(),
+            updatedAt: Date.now(),
+          };
+        });
+
+        const mergedItems = [...newVaultItems, ...current.items];
+        await handleUpdateVault(mergedItems, current.folders);
+      }
+    };
+
+    checkPendingAndroidSaves();
+    const sub = AppState.addEventListener('change', (nextState) => {
+      if (nextState === 'active') {
+        checkPendingAndroidSaves();
+      }
+    });
+
+    return () => sub.remove();
+  }, [session?.uid]);
 
   const handleAuthenticatedSession = async (
     uid: string,
@@ -144,58 +187,22 @@ export default function App() {
   ) => {
     setSession({ uid, email, derivedKey, items, folders });
 
-    // Si estamos en la Extensión MS Edge / Web, guardamos la sesión activa por 72 horas
-    if (Platform.OS === 'web') {
-      await StorageService.setItem(
-        WEB_PERSIST_KEY,
-        JSON.stringify({
-          uid,
-          email,
-          derivedKey,
-          expiresAt: Date.now() + WEB_SESSION_TTL_MS,
-        })
-      );
-    }
+    // Guarda la sesión activa durante 1 MES (30 días) tanto en Android como en la Extensión MS Edge
+    await StorageService.setItem(
+      PERSISTENT_SESSION_KEY,
+      JSON.stringify({
+        uid,
+        email,
+        derivedKey,
+        expiresAt: Date.now() + SESSION_ONE_MONTH_TTL_MS,
+      })
+    );
+
+    await AutofillBridgeService.syncVaultWithSystemAutofill(items);
   };
-
-  useEffect(() => {
-    StorageService.getItem('autolock_minutes').then((saved) => {
-      if (saved) setAutoLockMinutes(Number(saved) || 5);
-    });
-  }, []);
-
-  // Auto-Lock por inactividad en Celular Android (en Web/Extensión se rige por las 72 horas)
-  useEffect(() => {
-    if (!session || Platform.OS === 'web') return;
-    resetInactivityTimer();
-
-    const interval = setInterval(() => {
-      const elapsedMs = Date.now() - lastActivityRef.current;
-      if (elapsedMs >= autoLockMinutes * 60 * 1000) {
-        handleLogout();
-      }
-    }, 10000);
-
-    const sub = AppState.addEventListener('change', (nextState) => {
-      if (nextState === 'active') {
-        const elapsedMs = Date.now() - lastActivityRef.current;
-        if (elapsedMs >= autoLockMinutes * 60 * 1000) {
-          handleLogout();
-        }
-      } else {
-        lastActivityRef.current = Date.now();
-      }
-    });
-
-    return () => {
-      clearInterval(interval);
-      sub.remove();
-    };
-  }, [session, autoLockMinutes]);
 
   const handleChangeAutoLock = async (minutes: number) => {
     setAutoLockMinutes(minutes);
-    resetInactivityTimer();
     await StorageService.setItem('autolock_minutes', String(minutes));
   };
 
@@ -207,26 +214,29 @@ export default function App() {
     updatedItems: VaultItem[],
     updatedFolders: CustomFolder[]
   ) => {
-    if (!session) return;
-    resetInactivityTimer();
+    const current = sessionRef.current;
+    if (!current) return;
+
     setSession({
-      ...session,
+      ...current,
       items: updatedItems,
       folders: updatedFolders,
     });
 
-    const userStorageKey = `user_${session.email.replace(/[^a-z0-9]/g, '_')}`;
+    await AutofillBridgeService.syncVaultWithSystemAutofill(updatedItems);
+
+    const userStorageKey = `user_${current.email.replace(/[^a-z0-9]/g, '_')}`;
     const encryptedVault = CryptoService.encryptVault(
       { items: updatedItems, folders: updatedFolders },
-      session.derivedKey
+      current.derivedKey
     );
 
     await StorageService.setItem(`${userStorageKey}_vault`, encryptedVault);
 
     if (FirebaseService.isConfigured()) {
       await FirebaseService.updateEncryptedVault(
-        session.uid,
-        session.email,
+        current.uid,
+        current.email,
         encryptedVault
       );
     }
@@ -246,7 +256,7 @@ export default function App() {
       await StorageService.removeItem(`${userStorageKey}_2fa_secret`);
       await StorageService.removeItem(`${userStorageKey}_2fa_trusted_until`);
       await StorageService.removeItem('biometric_enabled_session');
-      await StorageService.removeItem(WEB_PERSIST_KEY);
+      await StorageService.removeItem(PERSISTENT_SESSION_KEY);
     } finally {
       setDeleteModalVisible(false);
       setSession(null);
@@ -254,7 +264,7 @@ export default function App() {
   };
 
   const handleLogout = async () => {
-    await StorageService.removeItem(WEB_PERSIST_KEY);
+    await StorageService.removeItem(PERSISTENT_SESSION_KEY);
     await FirebaseService.logout();
     setSession(null);
   };
@@ -295,13 +305,9 @@ export default function App() {
   }
 
   return (
-    <SafeAreaView
-      style={styles.safeArea}
-      onTouchStart={resetInactivityTimer}
-    >
+    <SafeAreaView style={styles.safeArea}>
       <StatusBar barStyle="light-content" backgroundColor={Colors.background} translucent={false} />
 
-      {/* Contenedor exterior con espaciado alrededor para que nada quede pegado a las orillas */}
       <View style={styles.appOuterFrame}>
         <View style={styles.headerCard}>
           <View style={styles.headerTopRow}>
@@ -428,7 +434,6 @@ const styles = StyleSheet.create({
   mainContentWrapper: {
     flex: 1,
   },
-  // Marco centrado con espaciado alrededor tanto en MS Edge como en Android
   appOuterFrame: {
     flex: 1,
     width: '100%',

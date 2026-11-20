@@ -378,40 +378,49 @@ export const VaultDashboard: React.FC<VaultDashboardProps> = ({
         )}
       </ScrollView>
 
-      <VaultItemModal
-        visible={itemModalVisible}
-        onClose={() => setItemModalVisible(false)}
-        onSave={handleSaveItem}
-        onDelete={handleDeleteItem}
-        initialItem={editingItem}
-        folders={folders}
-        defaultMasterEmail={masterEmail}
-      />
+      {/* Modales con montaje condicional para evitar sobrecarga o crashes al entrar al Dashboard */}
+      {itemModalVisible && (
+        <VaultItemModal
+          visible={itemModalVisible}
+          onClose={() => setItemModalVisible(false)}
+          onSave={handleSaveItem}
+          onDelete={handleDeleteItem}
+          initialItem={editingItem}
+          folders={folders}
+          defaultMasterEmail={masterEmail}
+        />
+      )}
 
-      <PasswordGeneratorModal
-        visible={standaloneGenerator}
-        onClose={() => setStandaloneGenerator(false)}
-        onUsePassword={() => setStandaloneGenerator(false)}
-      />
+      {standaloneGenerator && (
+        <PasswordGeneratorModal
+          visible={standaloneGenerator}
+          onClose={() => setStandaloneGenerator(false)}
+          onUsePassword={() => setStandaloneGenerator(false)}
+        />
+      )}
 
-      <NotebookScannerModal
-        visible={scannerVisible}
-        onClose={() => setScannerVisible(false)}
-        defaultMasterEmail={masterEmail}
-        onImportAccounts={(newScannedItems) => {
-          onUpdateVault([...newScannedItems, ...items], folders);
-        }}
-      />
+      {scannerVisible && (
+        <NotebookScannerModal
+          visible={scannerVisible}
+          onClose={() => setScannerVisible(false)}
+          defaultMasterEmail={masterEmail}
+          onImportAccounts={(newScannedItems) => {
+            onUpdateVault([...newScannedItems, ...items], folders);
+          }}
+        />
+      )}
 
-      <AutofillSettingsModal
-        visible={autofillModalVisible}
-        onClose={() => setAutofillModalVisible(false)}
-        items={items}
-        masterEmail={masterEmail}
-        onSaveNewCapturedAccount={(newItem) => {
-          onUpdateVault([newItem, ...items], folders);
-        }}
-      />
+      {autofillModalVisible && (
+        <AutofillSettingsModal
+          visible={autofillModalVisible}
+          onClose={() => setAutofillModalVisible(false)}
+          items={items}
+          masterEmail={masterEmail}
+          onSaveNewCapturedAccount={(newItem) => {
+            onUpdateVault([newItem, ...items], folders);
+          }}
+        />
+      )}
     </View>
   );
 };

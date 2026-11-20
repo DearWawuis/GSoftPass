@@ -41,6 +41,7 @@ interface AuthScreenProps {
     uid: string,
     email: string,
     derivedKey: string,
+    authHash: string,
     items: VaultItem[],
     folders: CustomFolder[]
   ) => void;
@@ -53,7 +54,6 @@ const DEFAULT_FOLDERS: CustomFolder[] = [
   { id: 'finance', name: 'Bancos y Tarjetas', icon: 'CreditCard' },
 ];
 
-// 7 días en milisegundos para no pedir 2FA a cada rato en el mismo dispositivo
 const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
 
 export const AuthScreen: React.FC<AuthScreenProps> = ({
@@ -72,16 +72,17 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
   const [loading, setLoading] = useState(false);
   const [legalVisible, setLegalVisible] = useState(false);
 
-  // Estados de Biometría y 2FA Inteligente (7 días de confianza)
   const [savedBioSession, setSavedBioSession] = useState<{
     uid: string;
     email: string;
     derivedKey: string;
+    authHash?: string;
   } | null>(null);
   const [pending2FASession, setPending2FASession] = useState<{
     uid: string;
     email: string;
     derivedKey: string;
+    authHash: string;
     items: VaultItem[];
     folders: CustomFolder[];
     secret: string;
@@ -89,6 +90,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
   const [totpCode, setTotpCode] = useState('');
   const [remember2FADevice, setRemember2FADevice] = useState(true);
 
+  const scrollViewRef = useRef<ScrollView>(null);
   const passwordInputRef = useRef<TextInput>(null);
   const confirmInputRef = useRef<TextInput>(null);
 
@@ -110,11 +112,14 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
     }
   };
 
-  /**
-   * Desbloqueo con Huella / Rostro:
-   * Al autenticar con biometría física en un dispositivo ya vinculado,
-   * entra directo sin molestar pidiendo el código 2FA.
-   */
+  const scrollInputIntoView = (yOffset = 140) => {
+    if (Platform.OS !== 'web') {
+      setTimeout(() => {
+        scrollViewRef.current?.scrollTo({ y: yOffset, animated: true });
+      }, 120);
+    }
+  };
+
   const handleBiometricLogin = async () => {
     if (!savedBioSession) return;
     setErrorMsg('');
@@ -129,7 +134,21 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
     setLoading(true);
     try {
       const userStorageKey = `user_${savedBioSession.email.replace(/[^a-z0-9]/g, '_')}`;
-      const encryptedVault = await StorageService.getItem(`${userStorageKey}_vault`);
+      let encryptedVault = await StorageService.getItem(`${userStorageKey}_vault`);
+
+      // Descargar siempre la versión más reciente desde la nube
+      if (FirebaseService.isConfigured() && savedBioSession.authHash) {
+        const cloudDoc = await FirebaseService.fetchLatestCloudVault(
+          savedBioSession.uid,
+          savedBioSession.email,
+          savedBioSession.authHash
+        );
+        if (cloudDoc?.encryptedVault) {
+          encryptedVault = cloudDoc.encryptedVault;
+          await StorageService.setItem(`${userStorageKey}_vault`, encryptedVault);
+        }
+      }
+
       let items: VaultItem[] = [];
       let folders: CustomFolder[] = DEFAULT_FOLDERS;
 
@@ -139,21 +158,16 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
           folders: CustomFolder[];
         }>(encryptedVault, savedBioSession.derivedKey);
         if (decrypted) {
-          items = decrypted.items;
-          folders = decrypted.folders;
+          items = decrypted.items || [];
+          folders = decrypted.folders || DEFAULT_FOLDERS;
         }
       }
-
-      // Renueva la confianza de 7 días en este dispositivo y entra directo
-      await StorageService.setItem(
-        `${userStorageKey}_2fa_trusted_until`,
-        String(Date.now() + SEVEN_DAYS_MS)
-      );
 
       onAuthenticated(
         savedBioSession.uid,
         savedBioSession.email,
         savedBioSession.derivedKey,
+        savedBioSession.authHash || '',
         items,
         folders
       );
@@ -162,42 +176,51 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
     }
   };
 
-  /**
-   * Verifica si la cuenta tiene 2FA activo Y si ya pasaron más de 7 días
-   * (o es un dispositivo nuevo donde aún no se ha verificado).
-   */
   const proceedOrRequire2FA = async (
     uid: string,
     cleanEmail: string,
     derivedKey: string,
+    authHash: string,
     items: VaultItem[],
-    folders: CustomFolder[]
+    folders: CustomFolder[],
+    cloudEncrypted2FA?: string | null
   ) => {
     const userStorageKey = `user_${cleanEmail.replace(/[^a-z0-9]/g, '_')}`;
-    const saved2FASecret = await StorageService.getItem(`${userStorageKey}_2fa_secret`);
+    let saved2FASecret = await StorageService.getItem(`${userStorageKey}_2fa_secret`);
+
+    // Si reinstaló la app o entra en otro dispositivo, desciframos el secreto 2FA que viene de la nube
+    if (!saved2FASecret && cloudEncrypted2FA) {
+      const decrypted2FA = CryptoService.decryptVault<{ secret: string }>(
+        cloudEncrypted2FA,
+        derivedKey
+      );
+      if (decrypted2FA?.secret) {
+        saved2FASecret = decrypted2FA.secret;
+        await StorageService.setItem(`${userStorageKey}_2fa_secret`, saved2FASecret);
+      }
+    }
 
     if (!saved2FASecret) {
-      onAuthenticated(uid, cleanEmail, derivedKey, items, folders);
+      onAuthenticated(uid, cleanEmail, derivedKey, authHash, items, folders);
       return;
     }
 
-    // Revisamos si este dispositivo ya fue verificado en los últimos 7 días
+    // Si desinstaló y volvió a instalar la app, este valor es null, por lo que SIEMPRE pedirá el 2FA por seguridad
     const trustedUntilRaw = await StorageService.getItem(
       `${userStorageKey}_2fa_trusted_until`
     );
     const trustedUntil = trustedUntilRaw ? Number(trustedUntilRaw) : 0;
 
     if (Date.now() < trustedUntil) {
-      // Dispositivo de confianza vigente: entra directo sin pedir código
-      onAuthenticated(uid, cleanEmail, derivedKey, items, folders);
+      onAuthenticated(uid, cleanEmail, derivedKey, authHash, items, folders);
       return;
     }
 
-    // Es un dispositivo nuevo o ya pasó 1 semana: solicitamos el código 2FA
     setPending2FASession({
       uid,
       email: cleanEmail,
       derivedKey,
+      authHash,
       items,
       folders,
       secret: saved2FASecret,
@@ -220,6 +243,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
         pending2FASession.uid,
         pending2FASession.email,
         pending2FASession.derivedKey,
+        pending2FASession.authHash,
         pending2FASession.items,
         pending2FASession.folders
       );
@@ -285,45 +309,86 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
 
         let uid = userStorageKey;
         if (FirebaseService.isConfigured()) {
-          uid = await FirebaseService.registerUserVault(cleanEmail, authHash, encryptedVault);
+          try {
+            uid = await FirebaseService.registerUserVault(cleanEmail, authHash, encryptedVault);
+          } catch (cloudErr: any) {
+            if (cloudErr?.code === 'auth/wrong-password' || cloudErr?.code === 'auth/invalid-credential') {
+              setErrorMsg('Este correo ya está registrado con otra Contraseña Maestra.');
+              setLoading(false);
+              return;
+            }
+            // Si hay fallo de red o configuración en Firebase, continúa guardando localmente
+          }
         }
 
         await StorageService.setItem(`${userStorageKey}_uid`, uid);
         await StorageService.setItem(`${userStorageKey}_hash`, authHash);
         await StorageService.setItem(`${userStorageKey}_vault`, encryptedVault);
 
-        onAuthenticated(uid, cleanEmail, derivedKey, initialItems, DEFAULT_FOLDERS);
+        onAuthenticated(uid, cleanEmail, derivedKey, authHash, initialItems, DEFAULT_FOLDERS);
       } else {
         let uid = (await StorageService.getItem(`${userStorageKey}_uid`)) || userStorageKey;
-        let encryptedVault: string | null = null;
+        const localSavedHash = await StorageService.getItem(`${userStorageKey}_hash`);
+        const localEncryptedVault = await StorageService.getItem(`${userStorageKey}_vault`);
+
+        let encryptedVault: string | null = localEncryptedVault;
+        let cloudEncrypted2FA: string | null = null;
 
         if (FirebaseService.isConfigured()) {
-          const cloudData = await FirebaseService.loginAndFetchVault(cleanEmail, authHash);
-          uid = cloudData.uid;
-          encryptedVault = cloudData.encryptedVault;
-
-          if (encryptedVault) {
+          try {
+            const cloudData = await FirebaseService.loginAndFetchVault(
+              cleanEmail,
+              authHash,
+              localEncryptedVault
+            );
+            uid = cloudData.uid;
+            if (cloudData.encryptedVault) {
+              encryptedVault = cloudData.encryptedVault;
+              await StorageService.setItem(`${userStorageKey}_vault`, encryptedVault);
+            }
+            cloudEncrypted2FA = cloudData.encryptedTwoFASecret;
             await StorageService.setItem(`${userStorageKey}_uid`, uid);
             await StorageService.setItem(`${userStorageKey}_hash`, authHash);
-            await StorageService.setItem(`${userStorageKey}_vault`, encryptedVault);
+          } catch (cloudErr: any) {
+            // Si Firebase rechaza pero existe localmente con el hash correcto, permitimos acceso local
+            if (localSavedHash && localSavedHash === authHash) {
+              encryptedVault = localEncryptedVault;
+            } else if (
+              cloudErr?.code === 'auth/user-not-found' &&
+              !localSavedHash
+            ) {
+              setErrorMsg('No existe una cuenta con este correo. Cambia a "Crear tu cuenta gratis".');
+              setLoading(false);
+              return;
+            } else {
+              setErrorMsg('Contraseña Maestra incorrecta.');
+              setLoading(false);
+              return;
+            }
           }
         } else {
-          const savedHash = await StorageService.getItem(`${userStorageKey}_hash`);
-          if (!savedHash) {
-            setErrorMsg('No existe una cuenta con este correo.');
+          if (!localSavedHash) {
+            setErrorMsg('No existe una cuenta con este correo. Cambia a "Crear tu cuenta gratis".');
             setLoading(false);
             return;
           }
-          if (savedHash !== authHash) {
+          if (localSavedHash !== authHash) {
             setErrorMsg('Contraseña Maestra incorrecta.');
             setLoading(false);
             return;
           }
-          encryptedVault = await StorageService.getItem(`${userStorageKey}_vault`);
         }
 
         if (!encryptedVault) {
-          await proceedOrRequire2FA(uid, cleanEmail, derivedKey, [], DEFAULT_FOLDERS);
+          await proceedOrRequire2FA(
+            uid,
+            cleanEmail,
+            derivedKey,
+            authHash,
+            [],
+            DEFAULT_FOLDERS,
+            cloudEncrypted2FA
+          );
           return;
         }
 
@@ -342,12 +407,14 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
           uid,
           cleanEmail,
           derivedKey,
-          decrypted.items,
-          decrypted.folders
+          authHash,
+          decrypted.items || [],
+          decrypted.folders || DEFAULT_FOLDERS,
+          cloudEncrypted2FA
         );
       }
-    } catch {
-      setErrorMsg('Error de autenticación. Verifica tus datos o tu conexión.');
+    } catch (e: any) {
+      setErrorMsg(`Error al autenticar: ${e?.message || 'Verifica tus datos.'}`);
     } finally {
       setLoading(false);
     }
@@ -355,10 +422,16 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
 
   if (pending2FASession) {
     return (
-      <KeyboardAvoidingView style={styles.outerContainer}>
+      <KeyboardAvoidingView
+        style={styles.outerContainer}
+        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        keyboardVerticalOffset={Platform.OS === 'android' ? 24 : 0}
+      >
         <ScrollView
+          ref={scrollViewRef}
           contentContainerStyle={styles.scrollContent}
           keyboardShouldPersistTaps="handled"
+          automaticallyAdjustKeyboardInsets={true}
           showsVerticalScrollIndicator={false}
         >
           <View style={styles.card}>
@@ -368,7 +441,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
               </View>
               <Text style={styles.brandTitle}>Verificación 2FA</Text>
               <Text style={styles.brandSubtitle}>
-                Ingresa el código de 6 dígitos de tu autenticador para{' '}
+                Por seguridad, ingresa el código de 6 dígitos de tu autenticador para{' '}
                 {pending2FASession.email}
               </Text>
             </View>
@@ -387,11 +460,11 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
               maxLength={6}
               value={totpCode}
               onChangeText={setTotpCode}
+              onFocus={() => scrollInputIntoView(100)}
               returnKeyType="done"
               onSubmitEditing={handleVerify2FA}
             />
 
-            {/* Casilla para recordar este dispositivo durante 7 días */}
             <TouchableOpacity
               style={styles.rememberDeviceRow}
               onPress={() => setRemember2FADevice(!remember2FADevice)}
@@ -402,7 +475,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
                 <Square size={18} color={Colors.textSecondary} />
               )}
               <Text style={styles.rememberDeviceText}>
-                Confiar en este dispositivo y no pedir código durante 7 días
+                Confiar en esta instalación durante 7 días
               </Text>
             </TouchableOpacity>
 
@@ -429,14 +502,16 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
   return (
     <KeyboardAvoidingView
       style={styles.outerContainer}
-      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+      keyboardVerticalOffset={Platform.OS === 'android' ? 24 : 0}
     >
       <ScrollView
+        ref={scrollViewRef}
         contentContainerStyle={styles.scrollContent}
         keyboardShouldPersistTaps="handled"
+        automaticallyAdjustKeyboardInsets={true}
         showsVerticalScrollIndicator={false}
       >
-        {/* Barra de Selección de Idioma con espacio superior garantizado en MS Edge y Móvil */}
         <View style={styles.langBar} accessibilityRole="tablist">
           <Globe size={15} color={Colors.primary} />
           {(Object.keys(LANGUAGE_LABELS) as LanguageCode[]).map((code) => (
@@ -488,6 +563,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
                 placeholderTextColor={Colors.textMuted}
                 value={email}
                 onChangeText={setEmail}
+                onFocus={() => scrollInputIntoView(90)}
                 autoCapitalize="none"
                 keyboardType="email-address"
                 returnKeyType="next"
@@ -516,6 +592,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
                 secureTextEntry={!showPassword}
                 value={masterPassword}
                 onChangeText={setMasterPassword}
+                onFocus={() => scrollInputIntoView(160)}
                 autoCapitalize="none"
                 returnKeyType={isRegistering ? 'next' : 'done'}
                 onSubmitEditing={() => {
@@ -549,6 +626,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
                   secureTextEntry={!showPassword}
                   value={confirmPassword}
                   onChangeText={setConfirmPassword}
+                  onFocus={() => scrollInputIntoView(220)}
                   autoCapitalize="none"
                   returnKeyType="done"
                   onSubmitEditing={handleSubmit}
@@ -626,9 +704,9 @@ const styles = StyleSheet.create({
     flexGrow: 1,
     alignItems: 'center',
     justifyContent: 'center',
-    paddingTop: 28,      // Espacio superior amplio para que la barra de idiomas se vea completa
-    paddingBottom: 24,
-    paddingHorizontal: 24, // Margen lateral holgado alrededor de la tarjeta
+    paddingTop: 28,
+    paddingBottom: 90, // Espacio inferior extra para que al abrir el teclado el formulario suba libremente
+    paddingHorizontal: 24,
   },
   langBar: {
     flexDirection: 'row',

@@ -1,7 +1,25 @@
 // plugins/withGSoftPassAutofill.js
-const { withAndroidManifest, withDangerousMod, withMainApplication } = require('@expo/config-plugins');
+const {
+  withAndroidManifest,
+  withDangerousMod,
+  withMainApplication,
+  withAppBuildGradle,
+} = require('@expo/config-plugins');
 const fs = require('fs');
 const path = require('path');
+
+function withAutofillGradleDependency(config) {
+  return withAppBuildGradle(config, (config) => {
+    const dep = 'implementation("androidx.autofill:autofill:1.1.0")';
+    if (!config.modResults.contents.includes('androidx.autofill:autofill')) {
+      config.modResults.contents = config.modResults.contents.replace(
+        /dependencies\s*\{/,
+        `dependencies {\n    ${dep}`
+      );
+    }
+    return config;
+  });
+}
 
 function withAutofillAndPasskeysManifest(config) {
   return withAndroidManifest(config, async (config) => {
@@ -108,6 +126,7 @@ function withAutofillNativeFiles(config) {
 }
 
 module.exports = function withGSoftPassAutofill(config) {
+  config = withAutofillGradleDependency(config);
   config = withAutofillAndPasskeysManifest(config);
   config = withAutofillMainApplication(config);
   config = withAutofillNativeFiles(config);

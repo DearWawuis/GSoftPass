@@ -4,11 +4,18 @@ package com.gsoftpass.app.autofill
 import android.app.Activity
 import android.content.Context
 import android.content.Intent
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.net.Uri
 import android.os.Build
 import android.provider.Settings
 import android.view.autofill.AutofillManager
 import com.facebook.react.bridge.*
+import org.json.JSONArray
+import java.io.File
+import java.io.FileOutputStream
+import java.net.HttpURLConnection
+import java.net.URL
 
 class GSoftPassAutofillModule(private val reactContext: ReactApplicationContext) :
     ReactContextBaseJavaModule(reactContext) {
@@ -71,7 +78,51 @@ class GSoftPassAutofillModule(private val reactContext: ReactApplicationContext)
             .putBoolean("INLINE_AUTOFILL_ENABLED", inlineEnabled)
             .putBoolean("DROPDOWN_AUTOFILL_ENABLED", dropdownEnabled)
             .apply()
+
+        // Pre-descarga en segundo plano los iconos de IA (iconUrl) para el teclado de Android
+        cacheCredentialIconsInBackground(credentialsJson)
         promise.resolve(true)
+    }
+
+    private fun cacheCredentialIconsInBackground(credentialsJson: String) {
+        Thread {
+            try {
+                val iconsDir = File(reactContext.filesDir, "autofill_icons")
+                if (!iconsDir.exists()) iconsDir.mkdirs()
+
+                val arr = JSONArray(credentialsJson)
+                for (i in 0 until arr.length()) {
+                    val obj = arr.optJSONObject(i) ?: continue
+                    val id = obj.optString("id", "").trim()
+                    val iconUrl = obj.optString("iconUrl", "").trim()
+                    if (id.isEmpty() || !iconUrl.startsWith("http")) continue
+
+                    val safeId = id.replace(Regex("[^a-zA-Z0-9_-]"), "_")
+                    val targetFile = File(iconsDir, "$safeId.png")
+                    if (targetFile.exists() && targetFile.length() > 100) continue
+
+                    try {
+                        val conn = (URL(iconUrl).openConnection() as HttpURLConnection).apply {
+                            connectTimeout = 5000
+                            readTimeout = 5000
+                            instanceFollowRedirects = true
+                        }
+                        if (conn.responseCode == HttpURLConnection.HTTP_OK) {
+                            conn.inputStream.use { stream ->
+                                val bmp = BitmapFactory.decodeStream(stream)
+                                if (bmp != null) {
+                                    val scaled = Bitmap.createScaledBitmap(bmp, 96, 96, true)
+                                    FileOutputStream(targetFile).use { out ->
+                                        scaled.compress(Bitmap.CompressFormat.PNG, 100, out)
+                                    }
+                                }
+                            }
+                        }
+                        conn.disconnect()
+                    } catch (_: Exception) {}
+                }
+            } catch (_: Exception) {}
+        }.start()
     }
 
     @ReactMethod

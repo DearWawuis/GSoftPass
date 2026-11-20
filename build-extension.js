@@ -162,6 +162,12 @@ const manifestData = {
       run_at: 'document_idle',
     },
   ],
+  web_accessible_resources: [
+    {
+      resources: ['icon-16.png', 'icon-32.png', 'icon-48.png', 'icon-128.png', 'icon.png'],
+      matches: ['<all_urls>'],
+    },
+  ],
 };
 
 fs.writeFileSync(path.join(distDir, 'manifest.json'), JSON.stringify(manifestData, null, 2), 'utf8');

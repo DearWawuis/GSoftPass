@@ -30,7 +30,6 @@ import { LogOut, Shield, Trash2, AlertTriangle, Fingerprint } from 'lucide-react
 
 const BUY_ME_A_COFFEE_URL = 'https://www.buymeacoffee.com/DearTony';
 
-// Duración de sesión activa tanto en Android como en la Extensión MS Edge: 1 MES (30 días)
 const SESSION_ONE_MONTH_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const PERSISTENT_SESSION_KEY = 'gsoftpass_active_session_30d';
 
@@ -41,30 +40,94 @@ const DEFAULT_FOLDERS: CustomFolder[] = [
   { id: 'finance', name: 'Bancos y Tarjetas', icon: 'CreditCard' },
 ];
 
+// Escudo Anti-Crash: impide que cualquier error de renderizado cierre la aplicación en Android
+class RootErrorBoundary extends React.Component<
+  { onResetSession: () => void; children: React.ReactNode },
+  { hasError: boolean; errorText: string }
+> {
+  constructor(props: any) {
+    super(props);
+    this.state = { hasError: false, errorText: '' };
+  }
+
+  static getDerivedStateFromError(error: any) {
+    return {
+      hasError: true,
+      errorText: error?.message || String(error),
+    };
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <SafeAreaView
+          style={{
+            flex: 1,
+            backgroundColor: Colors.background,
+            justifyContent: 'center',
+            alignItems: 'center',
+            padding: 24,
+          }}
+        >
+          <Text style={{ color: Colors.primary, fontSize: 20, fontWeight: '800', marginBottom: 10 }}>
+            Recuperación Segura de GSoftPass
+          </Text>
+          <Text
+            style={{
+              color: Colors.textSecondary,
+              fontSize: 13,
+              textAlign: 'center',
+              marginBottom: 20,
+            }}
+          >
+            Se detectó un dato corrupto en la caché local: {this.state.errorText}
+          </Text>
+          <TouchableOpacity
+            style={{
+              backgroundColor: Colors.primary,
+              paddingVertical: 14,
+              paddingHorizontal: 22,
+              borderRadius: 12,
+            }}
+            onPress={() => {
+              this.setState({ hasError: false, errorText: '' });
+              this.props.onResetSession();
+            }}
+          >
+            <Text style={{ color: Colors.background, fontWeight: '800', fontSize: 14 }}>
+              Restablecer vista e iniciar sesión
+            </Text>
+          </TouchableOpacity>
+        </SafeAreaView>
+      );
+    }
+    return this.props.children;
+  }
+}
+
 export default function App() {
   const { width } = useWindowDimensions();
   const isMobile = width < 640;
 
   const [restoringSession, setRestoringSession] = useState(true);
   const [lang, setLang] = useState<LanguageCode>('es');
-  const t = Translations[lang];
+  const t = Translations[lang] || Translations.es;
 
   const [session, setSession] = useState<{
     uid: string;
     email: string;
     derivedKey: string;
+    authHash: string;
     items: VaultItem[];
     folders: CustomFolder[];
   } | null>(null);
 
   const [deleteModalVisible, setDeleteModalVisible] = useState(false);
   const [securityModalVisible, setSecurityModalVisible] = useState(false);
-  const [autoLockMinutes, setAutoLockMinutes] = useState<number>(43200); // 30 días en minutos
 
   const sessionRef = useRef(session);
   sessionRef.current = session;
 
-  // 1. Al abrir la app (en Android o en MS Edge), restaura la sesión de 1 mes automáticamente
   useEffect(() => {
     if (Platform.OS === 'web' && typeof document !== 'undefined') {
       const style = document.createElement('style');
@@ -81,8 +144,10 @@ export default function App() {
         }
       `;
       document.head.appendChild(style);
-    } else {
-      ScreenCapture.preventScreenCaptureAsync().catch(() => {});
+    } else if (Platform.OS === 'android' || Platform.OS === 'ios') {
+      try {
+        ScreenCapture.preventScreenCaptureAsync().catch(() => {});
+      } catch {}
     }
 
     restorePersistentOneMonthSession();
@@ -97,15 +162,37 @@ export default function App() {
       }
 
       const parsed = JSON.parse(savedRaw);
-      if (!parsed.expiresAt || Date.now() > parsed.expiresAt) {
-        // Expiró el mes completo: limpiamos y pedimos login
+      if (
+        !parsed ||
+        !parsed.email ||
+        !parsed.derivedKey ||
+        !parsed.expiresAt ||
+        Date.now() > Number(parsed.expiresAt)
+      ) {
         await StorageService.removeItem(PERSISTENT_SESSION_KEY);
         setRestoringSession(false);
         return;
       }
 
-      const userStorageKey = `user_${parsed.email.replace(/[^a-z0-9]/g, '_')}`;
-      const encryptedVault = await StorageService.getItem(`${userStorageKey}_vault`);
+      const userStorageKey = `user_${String(parsed.email).replace(/[^a-z0-9]/g, '_')}`;
+      const savedHash =
+        parsed.authHash || (await StorageService.getItem(`${userStorageKey}_hash`)) || '';
+      let encryptedVault = await StorageService.getItem(`${userStorageKey}_vault`);
+
+      if (FirebaseService.isConfigured() && savedHash) {
+        try {
+          const cloudDoc = await FirebaseService.fetchLatestCloudVault(
+            parsed.uid,
+            parsed.email,
+            savedHash
+          );
+          if (cloudDoc?.encryptedVault) {
+            encryptedVault = cloudDoc.encryptedVault;
+            await StorageService.setItem(`${userStorageKey}_vault`, encryptedVault);
+          }
+        } catch {}
+      }
+
       let items: VaultItem[] = [];
       let folders: CustomFolder[] = DEFAULT_FOLDERS;
 
@@ -115,20 +202,26 @@ export default function App() {
           folders: CustomFolder[];
         }>(encryptedVault, parsed.derivedKey);
         if (decrypted) {
-          items = decrypted.items;
-          folders = decrypted.folders;
+          items = Array.isArray(decrypted.items) ? decrypted.items : [];
+          folders =
+            Array.isArray(decrypted.folders) && decrypted.folders.length > 0
+              ? decrypted.folders
+              : DEFAULT_FOLDERS;
         }
       }
 
       setSession({
-        uid: parsed.uid,
-        email: parsed.email,
-        derivedKey: parsed.derivedKey,
+        uid: String(parsed.uid || userStorageKey),
+        email: String(parsed.email),
+        derivedKey: String(parsed.derivedKey),
+        authHash: String(savedHash),
         items,
         folders,
       });
 
-      await AutofillBridgeService.syncVaultWithSystemAutofill(items);
+      setTimeout(() => {
+        AutofillBridgeService.syncVaultWithSystemAutofill(items).catch(() => {});
+      }, 400);
     } catch {
       await StorageService.removeItem(PERSISTENT_SESSION_KEY);
     } finally {
@@ -136,74 +229,136 @@ export default function App() {
     }
   };
 
-  // 2. Importar automáticamente las contraseñas que el usuario guarde desde el Pop-up inferior de Android
   useEffect(() => {
-    if (Platform.OS !== 'android' || !session) return;
+    if (!session?.uid) return;
 
-    const checkPendingAndroidSaves = async () => {
-      const current = sessionRef.current;
-      if (!current) return;
-      const pending = await AutofillBridgeService.consumeAndroidSavedAccounts();
-      if (pending.length > 0) {
-        const newVaultItems: VaultItem[] = pending.map((p) => {
-          const brand = IconAIService.predictBrandMetadata(p.name, p.url);
-          return {
-            id: `autofill_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
-            type: 'account',
-            name: p.name || 'Cuenta Guardada',
-            url: p.url || '',
-            username: p.username || current.email,
-            password: p.password || '',
-            masterEmail: current.email,
-            folderId: brand.suggestedFolderId || 'social',
-            iconUrl: brand.iconUrl,
-            brandColor: brand.brandColor,
-            createdAt: Date.now(),
-            updatedAt: Date.now(),
-          };
-        });
+    const syncWithCloudAndNativeAutofill = async () => {
+      try {
+        const current = sessionRef.current;
+        if (!current) return;
 
-        const mergedItems = [...newVaultItems, ...current.items];
-        await handleUpdateVault(mergedItems, current.folders);
-      }
+        let workingItems = Array.isArray(current.items) ? [...current.items] : [];
+        const workingFolders = Array.isArray(current.folders)
+          ? [...current.folders]
+          : DEFAULT_FOLDERS;
+        let hasNewNativeItems = false;
+
+        if (Platform.OS === 'android') {
+          const pending = await AutofillBridgeService.consumeAndroidSavedAccounts();
+          if (Array.isArray(pending) && pending.length > 0) {
+            const newVaultItems: VaultItem[] = pending.map((p) => {
+              const brand = IconAIService.predictBrandMetadata(p.name || '', p.url || '');
+              return {
+                id: `autofill_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+                type: 'account',
+                name: p.name || 'Cuenta Guardada',
+                url: p.url || '',
+                username: p.username || current.email,
+                password: p.password || '',
+                masterEmail: current.email,
+                folderId: brand.suggestedFolderId || 'social',
+                iconUrl: brand.iconUrl || '',
+                brandColor: brand.brandColor || '#6366F1',
+                createdAt: Date.now(),
+                updatedAt: Date.now(),
+              };
+            });
+            workingItems = [...newVaultItems, ...workingItems];
+            hasNewNativeItems = true;
+          }
+        }
+
+        if (hasNewNativeItems) {
+          await handleUpdateVault(workingItems, workingFolders);
+          return;
+        }
+
+        if (FirebaseService.isConfigured() && current.authHash) {
+          const cloudDoc = await FirebaseService.fetchLatestCloudVault(
+            current.uid,
+            current.email,
+            current.authHash
+          );
+          if (cloudDoc?.encryptedVault) {
+            const decrypted = CryptoService.decryptVault<{
+              items: VaultItem[];
+              folders: CustomFolder[];
+            }>(cloudDoc.encryptedVault, current.derivedKey);
+            if (decrypted && Array.isArray(decrypted.items)) {
+              const userStorageKey = `user_${current.email.replace(/[^a-z0-9]/g, '_')}`;
+              await StorageService.setItem(`${userStorageKey}_vault`, cloudDoc.encryptedVault);
+              setSession((prev) =>
+                prev
+                  ? {
+                      ...prev,
+                      items: decrypted.items,
+                      folders:
+                        Array.isArray(decrypted.folders) && decrypted.folders.length > 0
+                          ? decrypted.folders
+                          : prev.folders,
+                    }
+                  : null
+              );
+              await AutofillBridgeService.syncVaultWithSystemAutofill(decrypted.items);
+            }
+          }
+        }
+      } catch {}
     };
 
-    checkPendingAndroidSaves();
+    const timer = setTimeout(() => {
+      syncWithCloudAndNativeAutofill();
+    }, 500);
+
     const sub = AppState.addEventListener('change', (nextState) => {
       if (nextState === 'active') {
-        checkPendingAndroidSaves();
+        syncWithCloudAndNativeAutofill();
       }
     });
 
-    return () => sub.remove();
+    return () => {
+      clearTimeout(timer);
+      sub.remove();
+    };
   }, [session?.uid]);
 
   const handleAuthenticatedSession = async (
     uid: string,
     email: string,
     derivedKey: string,
+    authHash: string,
     items: VaultItem[],
     folders: CustomFolder[]
   ) => {
-    setSession({ uid, email, derivedKey, items, folders });
+    const safeItems = Array.isArray(items) ? items : [];
+    const safeFolders =
+      Array.isArray(folders) && folders.length > 0 ? folders : DEFAULT_FOLDERS;
 
-    // Guarda la sesión activa durante 1 MES (30 días) tanto en Android como en la Extensión MS Edge
-    await StorageService.setItem(
-      PERSISTENT_SESSION_KEY,
-      JSON.stringify({
-        uid,
-        email,
-        derivedKey,
-        expiresAt: Date.now() + SESSION_ONE_MONTH_TTL_MS,
-      })
-    );
+    setSession({
+      uid: String(uid || email),
+      email: String(email),
+      derivedKey: String(derivedKey),
+      authHash: String(authHash || ''),
+      items: safeItems,
+      folders: safeFolders,
+    });
 
-    await AutofillBridgeService.syncVaultWithSystemAutofill(items);
-  };
+    try {
+      await StorageService.setItem(
+        PERSISTENT_SESSION_KEY,
+        JSON.stringify({
+          uid: String(uid || email),
+          email: String(email),
+          derivedKey: String(derivedKey),
+          authHash: String(authHash || ''),
+          expiresAt: Date.now() + SESSION_ONE_MONTH_TTL_MS,
+        })
+      );
 
-  const handleChangeAutoLock = async (minutes: number) => {
-    setAutoLockMinutes(minutes);
-    await StorageService.setItem('autolock_minutes', String(minutes));
+      setTimeout(() => {
+        AutofillBridgeService.syncVaultWithSystemAutofill(safeItems).catch(() => {});
+      }, 400);
+    } catch {}
   };
 
   const handleOpenCoffee = () => {
@@ -217,29 +372,44 @@ export default function App() {
     const current = sessionRef.current;
     if (!current) return;
 
-    setSession({
-      ...current,
-      items: updatedItems,
-      folders: updatedFolders,
-    });
-
-    await AutofillBridgeService.syncVaultWithSystemAutofill(updatedItems);
-
-    const userStorageKey = `user_${current.email.replace(/[^a-z0-9]/g, '_')}`;
-    const encryptedVault = CryptoService.encryptVault(
-      { items: updatedItems, folders: updatedFolders },
-      current.derivedKey
+    const cleanItems: VaultItem[] = JSON.parse(
+      JSON.stringify(Array.isArray(updatedItems) ? updatedItems : [])
+    );
+    const cleanFolders: CustomFolder[] = JSON.parse(
+      JSON.stringify(
+        Array.isArray(updatedFolders) && updatedFolders.length > 0
+          ? updatedFolders
+          : DEFAULT_FOLDERS
+      )
     );
 
-    await StorageService.setItem(`${userStorageKey}_vault`, encryptedVault);
+    const nextSession = {
+      ...current,
+      items: cleanItems,
+      folders: cleanFolders,
+    };
+    sessionRef.current = nextSession;
+    setSession(nextSession);
 
-    if (FirebaseService.isConfigured()) {
-      await FirebaseService.updateEncryptedVault(
-        current.uid,
-        current.email,
-        encryptedVault
+    try {
+      const userStorageKey = `user_${current.email.replace(/[^a-z0-9]/g, '_')}`;
+      const encryptedVault = CryptoService.encryptVault(
+        { items: cleanItems, folders: cleanFolders },
+        current.derivedKey
       );
-    }
+
+      await StorageService.setItem(`${userStorageKey}_vault`, encryptedVault);
+      await AutofillBridgeService.syncVaultWithSystemAutofill(cleanItems);
+
+      if (FirebaseService.isConfigured()) {
+        await FirebaseService.updateEncryptedVault(
+          current.uid,
+          current.email,
+          encryptedVault,
+          current.authHash
+        );
+      }
+    } catch {}
   };
 
   const handleDeleteAccountPermanently = async () => {
@@ -248,7 +418,11 @@ export default function App() {
 
     try {
       if (FirebaseService.isConfigured()) {
-        await FirebaseService.deleteAccountAndVaultPermanently(session.uid);
+        await FirebaseService.deleteAccountAndVaultPermanently(
+          session.uid,
+          session.email,
+          session.authHash
+        );
       }
       await StorageService.removeItem(`${userStorageKey}_uid`);
       await StorageService.removeItem(`${userStorageKey}_hash`);
@@ -277,147 +451,159 @@ export default function App() {
     );
   }
 
-  if (!session) {
-    return (
-      <SafeAreaView style={styles.safeArea}>
-        <StatusBar barStyle="light-content" backgroundColor={Colors.background} translucent={false} />
-        <View style={styles.mainContentWrapper}>
-          <AuthScreen
-            lang={lang}
-            onChangeLang={setLang}
-            onAuthenticated={handleAuthenticatedSession}
-          />
-        </View>
-
-        <View style={styles.loginFooter}>
-          <TouchableOpacity
-            style={styles.coffeePillSubtle}
-            onPress={handleOpenCoffee}
-            accessibilityRole="link"
-            accessibilityLabel="Buy me a taco en Buy Me a Coffee"
-          >
-            <Text style={{ fontSize: 15 }}>🌮</Text>
-            <Text style={styles.coffeePillSubtleText}>Buy me a taco</Text>
-          </TouchableOpacity>
-        </View>
-      </SafeAreaView>
-    );
-  }
-
   return (
-    <SafeAreaView style={styles.safeArea}>
-      <StatusBar barStyle="light-content" backgroundColor={Colors.background} translucent={false} />
+    <RootErrorBoundary onResetSession={handleLogout}>
+      {!session ? (
+        <SafeAreaView style={styles.safeArea}>
+          <StatusBar
+            barStyle="light-content"
+            backgroundColor={Colors.background}
+            translucent={false}
+          />
+          <View style={styles.mainContentWrapper}>
+            <AuthScreen
+              lang={lang}
+              onChangeLang={setLang}
+              onAuthenticated={handleAuthenticatedSession}
+            />
+          </View>
 
-      <View style={styles.appOuterFrame}>
-        <View style={styles.headerCard}>
-          <View style={styles.headerTopRow}>
-            <View style={styles.brandRow}>
-              <Shield size={22} color={Colors.primary} />
-              <View style={{ flex: 1 }}>
-                <Text style={styles.headerTitle}>GSoftPass</Text>
-                <Text style={styles.emailSubtitle} numberOfLines={1}>
-                  {session.email}
-                </Text>
+          <View style={styles.loginFooter}>
+            <TouchableOpacity
+              style={styles.coffeePillSubtle}
+              onPress={handleOpenCoffee}
+              accessibilityRole="link"
+              accessibilityLabel="Buy me a taco en Buy Me a Coffee"
+            >
+              <Text style={{ fontSize: 15 }}>🌮</Text>
+              <Text style={styles.coffeePillSubtleText}>Buy me a taco</Text>
+            </TouchableOpacity>
+          </View>
+        </SafeAreaView>
+      ) : (
+        <SafeAreaView style={styles.safeArea}>
+          <StatusBar
+            barStyle="light-content"
+            backgroundColor={Colors.background}
+            translucent={false}
+          />
+
+          <View style={styles.appOuterFrame}>
+            <View style={styles.headerCard}>
+              <View style={styles.headerTopRow}>
+                <View style={styles.brandRow}>
+                  <Shield size={22} color={Colors.primary} />
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.headerTitle}>GSoftPass</Text>
+                    <Text style={styles.emailSubtitle} numberOfLines={1}>
+                      {session.email}
+                    </Text>
+                  </View>
+                </View>
+
+                <View style={styles.headerActions}>
+                  <TouchableOpacity
+                    style={styles.coffeeHeaderBtn}
+                    onPress={handleOpenCoffee}
+                    accessibilityRole="link"
+                    accessibilityLabel="Buy me a taco"
+                  >
+                    <Text style={{ fontSize: 14 }}>🌮</Text>
+                    {!isMobile && <Text style={styles.coffeeHeaderText}>Buy me a taco</Text>}
+                  </TouchableOpacity>
+
+                  <TouchableOpacity
+                    style={styles.securityHeaderBtn}
+                    onPress={() => setSecurityModalVisible(true)}
+                    accessibilityRole="button"
+                    accessibilityLabel="Configurar Huella y 2FA"
+                  >
+                    <Fingerprint size={17} color={Colors.primary} />
+                  </TouchableOpacity>
+
+                  <TouchableOpacity
+                    style={styles.deleteAccountBtn}
+                    onPress={() => setDeleteModalVisible(true)}
+                    accessibilityRole="button"
+                    accessibilityLabel="Eliminar cuenta y bóveda"
+                  >
+                    <Trash2 size={16} color={Colors.danger} />
+                  </TouchableOpacity>
+
+                  <TouchableOpacity
+                    style={styles.logoutBtn}
+                    onPress={handleLogout}
+                    accessibilityRole="button"
+                    accessibilityLabel={t.lockVault}
+                  >
+                    <LogOut size={16} color={Colors.textSecondary} />
+                    {!isMobile && <Text style={styles.logoutText}>{t.lockVault}</Text>}
+                  </TouchableOpacity>
+                </View>
               </View>
             </View>
 
-            <View style={styles.headerActions}>
-              <TouchableOpacity
-                style={styles.coffeeHeaderBtn}
-                onPress={handleOpenCoffee}
-                accessibilityRole="link"
-                accessibilityLabel="Buy me a taco"
-              >
-                <Text style={{ fontSize: 14 }}>🌮</Text>
-                {!isMobile && <Text style={styles.coffeeHeaderText}>Buy me a taco</Text>}
-              </TouchableOpacity>
-
-              <TouchableOpacity
-                style={styles.securityHeaderBtn}
-                onPress={() => setSecurityModalVisible(true)}
-                accessibilityRole="button"
-                accessibilityLabel="Configurar Huella, Auto-Lock y 2FA"
-              >
-                <Fingerprint size={17} color={Colors.primary} />
-              </TouchableOpacity>
-
-              <TouchableOpacity
-                style={styles.deleteAccountBtn}
-                onPress={() => setDeleteModalVisible(true)}
-                accessibilityRole="button"
-                accessibilityLabel="Eliminar cuenta y bóveda"
-              >
-                <Trash2 size={16} color={Colors.danger} />
-              </TouchableOpacity>
-
-              <TouchableOpacity
-                style={styles.logoutBtn}
-                onPress={handleLogout}
-                accessibilityRole="button"
-                accessibilityLabel={t.lockVault}
-              >
-                <LogOut size={16} color={Colors.textSecondary} />
-                {!isMobile && <Text style={styles.logoutText}>{t.lockVault}</Text>}
-              </TouchableOpacity>
+            <View style={styles.dashboardWrapper}>
+              <VaultDashboard
+                masterEmail={session.email}
+                items={session.items}
+                folders={session.folders}
+                onUpdateVault={handleUpdateVault}
+              />
             </View>
           </View>
-        </View>
 
-        <View style={styles.dashboardWrapper}>
-          <VaultDashboard
-            masterEmail={session.email}
-            items={session.items}
-            folders={session.folders}
-            onUpdateVault={handleUpdateVault}
-          />
-        </View>
-      </View>
+          {/* Montaje condicional: solo se monta cuando el usuario toca el botón de seguridad */}
+          {securityModalVisible && (
+            <SecuritySettingsModal
+              visible={securityModalVisible}
+              onClose={() => setSecurityModalVisible(false)}
+              uid={session.uid}
+              email={session.email}
+              derivedKey={session.derivedKey}
+              authHash={session.authHash}
+            />
+          )}
 
-      <SecuritySettingsModal
-        visible={securityModalVisible}
-        onClose={() => setSecurityModalVisible(false)}
-        uid={session.uid}
-        email={session.email}
-        derivedKey={session.derivedKey}
-        autoLockMinutes={autoLockMinutes}
-        onChangeAutoLock={handleChangeAutoLock}
-      />
-
-      <Modal
-        visible={deleteModalVisible}
-        transparent
-        animationType="fade"
-        onRequestClose={() => setDeleteModalVisible(false)}
-      >
-        <View style={styles.modalOverlay}>
-          <View style={styles.modalCard}>
-            <View style={styles.warningHeader}>
-              <AlertTriangle size={24} color={Colors.danger} />
-              <Text style={styles.modalTitle}>¿Eliminar Cuenta y Bóveda?</Text>
-            </View>
-            <Text style={styles.modalDesc}>
-              Esta acción borrará permanentemente tu cuenta ({session.email}) y todas tus
-              contraseñas cifradas tanto de este dispositivo como de la nube. Debido a nuestra
-              arquitectura Zero-Knowledge, esta acción no se puede deshacer.
-            </Text>
-            <View style={styles.modalActions}>
-              <TouchableOpacity
-                style={styles.cancelBtn}
-                onPress={() => setDeleteModalVisible(false)}
-              >
-                <Text style={styles.cancelBtnText}>Cancelar</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={styles.confirmDeleteBtn}
-                onPress={handleDeleteAccountPermanently}
-              >
-                <Text style={styles.confirmDeleteText}>Eliminar</Text>
-              </TouchableOpacity>
-            </View>
-          </View>
-        </View>
-      </Modal>
-    </SafeAreaView>
+          {deleteModalVisible && (
+            <Modal
+              visible={deleteModalVisible}
+              transparent
+              animationType="fade"
+              onRequestClose={() => setDeleteModalVisible(false)}
+            >
+              <View style={styles.modalOverlay}>
+                <View style={styles.modalCard}>
+                  <View style={styles.warningHeader}>
+                    <AlertTriangle size={24} color={Colors.danger} />
+                    <Text style={styles.modalTitle}>¿Eliminar Cuenta y Bóveda?</Text>
+                  </View>
+                  <Text style={styles.modalDesc}>
+                    Esta acción borrará permanentemente tu cuenta ({session.email}) y todas tus
+                    contraseñas cifradas tanto de este dispositivo como de la nube. Debido a nuestra
+                    arquitectura Zero-Knowledge, esta acción no se puede deshacer.
+                  </Text>
+                  <View style={styles.modalActions}>
+                    <TouchableOpacity
+                      style={styles.cancelBtn}
+                      onPress={() => setDeleteModalVisible(false)}
+                    >
+                      <Text style={styles.cancelBtnText}>Cancelar</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      style={styles.confirmDeleteBtn}
+                      onPress={handleDeleteAccountPermanently}
+                    >
+                      <Text style={styles.confirmDeleteText}>Eliminar</Text>
+                    </TouchableOpacity>
+                  </View>
+                </View>
+              </View>
+            </Modal>
+          )}
+        </SafeAreaView>
+      )}
+    </RootErrorBoundary>
   );
 }
 

@@ -11,11 +11,11 @@ import {
   ScrollView,
   Image,
   Platform,
+  KeyboardAvoidingView,
 } from 'react-native';
 import {
   X,
   Fingerprint,
-  Clock,
   ShieldAlert,
   CheckCircle2,
   Copy,
@@ -26,6 +26,7 @@ import * as LocalAuthentication from 'expo-local-authentication';
 import { Colors } from '../theme/colors';
 import { StorageService } from '../services/StorageService';
 import { CryptoService } from '../services/CryptoService';
+import { FirebaseService } from '../services/FirebaseService';
 
 interface SecuritySettingsModalProps {
   visible: boolean;
@@ -33,16 +34,10 @@ interface SecuritySettingsModalProps {
   uid: string;
   email: string;
   derivedKey: string;
-  autoLockMinutes: number;
-  onChangeAutoLock: (minutes: number) => void;
+  authHash?: string;
 }
 
-const TIMEOUT_OPTIONS = [
-  { label: '1 min', value: 1 },
-  { label: '3 min', value: 3 },
-  { label: '5 min', value: 5 },
-  { label: '15 min', value: 15 },
-];
+const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
 
 export const SecuritySettingsModal: React.FC<SecuritySettingsModalProps> = ({
   visible,
@@ -50,14 +45,12 @@ export const SecuritySettingsModal: React.FC<SecuritySettingsModalProps> = ({
   uid,
   email,
   derivedKey,
-  autoLockMinutes,
-  onChangeAutoLock,
+  authHash,
 }) => {
   const [biometricSupported, setBiometricSupported] = useState(false);
   const [biometricEnabled, setBiometricEnabled] = useState(false);
   const [statusMessage, setStatusMessage] = useState('');
 
-  // Estados de 2FA (TOTP)
   const [twoFAEnabled, setTwoFAEnabled] = useState(false);
   const [totpSecret, setTotpSecret] = useState('');
   const [verificationCode, setVerificationCode] = useState('');
@@ -83,7 +76,25 @@ export const SecuritySettingsModal: React.FC<SecuritySettingsModalProps> = ({
     const bioSaved = await StorageService.getItem('biometric_enabled_session');
     setBiometricEnabled(!!bioSaved);
 
-    const saved2FASecret = await StorageService.getItem(`${userKey}_2fa_secret`);
+    let saved2FASecret = await StorageService.getItem(`${userKey}_2fa_secret`);
+
+    // Consultamos siempre Firestore para reflejar el estado real persistente en la nube
+    if (FirebaseService.isConfigured()) {
+      const cloudDoc = await FirebaseService.fetchLatestCloudVault(uid, email, authHash);
+      if (cloudDoc?.twoFAEnabled && cloudDoc?.encryptedTwoFASecret) {
+        const decryptedSecret = CryptoService.decryptVault<{ secret: string }>(
+          cloudDoc.encryptedTwoFASecret,
+          derivedKey
+        );
+        if (decryptedSecret?.secret) {
+          saved2FASecret = decryptedSecret.secret;
+          await StorageService.setItem(`${userKey}_2fa_secret`, saved2FASecret);
+        }
+      } else if (cloudDoc && cloudDoc.twoFAEnabled === false && !saved2FASecret) {
+        saved2FASecret = null;
+      }
+    }
+
     if (saved2FASecret) {
       setTwoFAEnabled(true);
       setTotpSecret(saved2FASecret);
@@ -95,7 +106,6 @@ export const SecuritySettingsModal: React.FC<SecuritySettingsModalProps> = ({
     }
   };
 
-  // 1. Activar o desactivar Desbloqueo con Huella / Rostro
   const handleToggleBiometrics = async (enable: boolean) => {
     setStatusMessage('');
     if (!enable) {
@@ -113,7 +123,7 @@ export const SecuritySettingsModal: React.FC<SecuritySettingsModalProps> = ({
     if (result.success) {
       await StorageService.setItem(
         'biometric_enabled_session',
-        JSON.stringify({ uid, email, derivedKey })
+        JSON.stringify({ uid, email, derivedKey, authHash })
       );
       setBiometricEnabled(true);
       setStatusMessage('¡Huella / Rostro habilitado! Ahora podrás iniciar sesión con 1 toque.');
@@ -122,7 +132,6 @@ export const SecuritySettingsModal: React.FC<SecuritySettingsModalProps> = ({
     }
   };
 
-  // 2. Configurar 2FA (TOTP)
   const handleStart2FASetup = () => {
     const newSecret = CryptoService.generateTOTPSecret();
     setTotpSecret(newSecret);
@@ -132,18 +141,43 @@ export const SecuritySettingsModal: React.FC<SecuritySettingsModalProps> = ({
   };
 
   const handleConfirmEnable2FA = async () => {
-    if (CryptoService.verifyTOTPCode(totpSecret, verificationCode)) {
-      await StorageService.setItem(`${userKey}_2fa_secret`, totpSecret);
-      setTwoFAEnabled(true);
-      setSettingUp2FA(false);
-      setStatusMessage('¡Autenticación de 2 Factores (2FA) activada correctamente!');
-    } else {
+    if (!CryptoService.verifyTOTPCode(totpSecret, verificationCode)) {
       setStatusMessage('Código incorrecto. Verifica los 6 dígitos en tu app autenticadora.');
+      return;
     }
+
+    const encryptedSecret = CryptoService.encryptVault({ secret: totpSecret }, derivedKey);
+    const savedInCloud = await FirebaseService.updateCloudTwoFA(
+      uid,
+      email,
+      encryptedSecret,
+      authHash
+    );
+
+    if (FirebaseService.isConfigured() && !savedInCloud) {
+      setStatusMessage(
+        'No se pudo guardar el 2FA en la nube. Verifica tu conexión a internet e inténtalo de nuevo.'
+      );
+      return;
+    }
+
+    await StorageService.setItem(`${userKey}_2fa_secret`, totpSecret);
+    await StorageService.setItem(
+      `${userKey}_2fa_trusted_until`,
+      String(Date.now() + SEVEN_DAYS_MS)
+    );
+
+    setTwoFAEnabled(true);
+    setSettingUp2FA(false);
+    setStatusMessage(
+      '¡2FA activado y guardado en tu base de datos! Si reinstalas la app o inicias sesión en otro dispositivo, te pedirá el código.'
+    );
   };
 
   const handleDisable2FA = async () => {
     await StorageService.removeItem(`${userKey}_2fa_secret`);
+    await StorageService.removeItem(`${userKey}_2fa_trusted_until`);
+    await FirebaseService.updateCloudTwoFA(uid, email, null, authHash);
     setTwoFAEnabled(false);
     setTotpSecret('');
     setSettingUp2FA(false);
@@ -172,7 +206,10 @@ export const SecuritySettingsModal: React.FC<SecuritySettingsModalProps> = ({
 
   return (
     <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
-      <View style={styles.overlay}>
+      <KeyboardAvoidingView
+        style={styles.overlay}
+        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+      >
         <View style={styles.card}>
           <View style={styles.header}>
             <View style={styles.titleRow}>
@@ -184,7 +221,10 @@ export const SecuritySettingsModal: React.FC<SecuritySettingsModalProps> = ({
             </TouchableOpacity>
           </View>
 
-          <ScrollView showsVerticalScrollIndicator={false}>
+          <ScrollView
+            showsVerticalScrollIndicator={false}
+            keyboardShouldPersistTaps="handled"
+          >
             {statusMessage ? (
               <View style={styles.statusBanner}>
                 <CheckCircle2 size={16} color={Colors.primary} />
@@ -214,43 +254,7 @@ export const SecuritySettingsModal: React.FC<SecuritySettingsModalProps> = ({
               </View>
             </View>
 
-            {/* SECCIÓN 2: CIERRE AUTOMÁTICO POR INACTIVIDAD */}
-            <View style={styles.sectionBox}>
-              <View style={styles.sectionHeaderRow}>
-                <Clock size={17} color={Colors.primary} />
-                <Text style={styles.sectionTitle}>
-                  Bloqueo automático por inactividad
-                </Text>
-              </View>
-              <Text style={styles.sectionDesc}>
-                Cierra la sesión automáticamente si dejas de usar la aplicación o pasas a otra app en
-                tu celular.
-              </Text>
-
-              <View style={styles.pillsRow}>
-                {TIMEOUT_OPTIONS.map((opt) => (
-                  <TouchableOpacity
-                    key={opt.value}
-                    style={[
-                      styles.timeoutPill,
-                      autoLockMinutes === opt.value && styles.timeoutPillActive,
-                    ]}
-                    onPress={() => onChangeAutoLock(opt.value)}
-                  >
-                    <Text
-                      style={[
-                        styles.timeoutPillText,
-                        autoLockMinutes === opt.value && styles.timeoutPillTextActive,
-                      ]}
-                    >
-                      {opt.label}
-                    </Text>
-                  </TouchableOpacity>
-                ))}
-              </View>
-            </View>
-
-            {/* SECCIÓN 3: AUTENTICACIÓN DE DOS FACTORES (2FA TOTP) */}
+            {/* SECCIÓN 2: AUTENTICACIÓN DE DOS FACTORES (2FA TOTP PERSISTENTE EN NUBE) */}
             <View style={styles.sectionBox}>
               <View style={styles.sectionHeaderRow}>
                 <ShieldAlert size={18} color={Colors.accent} />
@@ -259,13 +263,14 @@ export const SecuritySettingsModal: React.FC<SecuritySettingsModalProps> = ({
                 </Text>
               </View>
               <Text style={styles.sectionDesc}>
-                Solicita un código dinámico de 6 dígitos (Google Authenticator, Microsoft
-                Authenticator o Authy) además de tu Contraseña Maestra al iniciar sesión.
+                Solicita un código de 6 dígitos (Google Authenticator, Microsoft Authenticator o
+                Authy) cuando inicies sesión en un dispositivo nuevo, después de reinstalar la
+                aplicación o cada 7 días.
               </Text>
 
               {twoFAEnabled ? (
                 <View style={styles.enabled2FABox}>
-                  <Text style={styles.enabled2FAText}>✓ Protección 2FA Activa en esta cuenta</Text>
+                  <Text style={styles.enabled2FAText}>✓ Protección 2FA Activa en tu cuenta</Text>
                   <TouchableOpacity style={styles.disable2FABtn} onPress={handleDisable2FA}>
                     <Text style={styles.disable2FAText}>Desactivar 2FA</Text>
                   </TouchableOpacity>
@@ -325,7 +330,7 @@ export const SecuritySettingsModal: React.FC<SecuritySettingsModalProps> = ({
             </View>
           </ScrollView>
         </View>
-      </View>
+      </KeyboardAvoidingView>
     </Modal>
   );
 };
@@ -411,33 +416,6 @@ const styles = StyleSheet.create({
     lineHeight: 18,
     marginTop: 4,
   },
-  pillsRow: {
-    flexDirection: 'row',
-    gap: 8,
-    marginTop: 12,
-  },
-  timeoutPill: {
-    flex: 1,
-    paddingVertical: 9,
-    borderRadius: 10,
-    backgroundColor: Colors.surfaceLight,
-    alignItems: 'center',
-    borderWidth: 1,
-    borderColor: Colors.border,
-  },
-  timeoutPillActive: {
-    backgroundColor: 'rgba(6, 182, 212, 0.18)',
-    borderColor: Colors.primary,
-  },
-  timeoutPillText: {
-    color: Colors.textSecondary,
-    fontSize: 12,
-    fontWeight: '600',
-  },
-  timeoutPillTextActive: {
-    color: Colors.primary,
-    fontWeight: '800',
-  },
   setup2FABtn: {
     marginTop: 12,
     backgroundColor: Colors.primary,
@@ -458,8 +436,10 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
+    gap: 10,
     backgroundColor: 'rgba(16, 185, 129, 0.12)',
-    padding: 12,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
     borderRadius: 12,
     borderWidth: 1,
     borderColor: Colors.success,
@@ -468,17 +448,23 @@ const styles = StyleSheet.create({
     color: Colors.success,
     fontSize: 12,
     fontWeight: '700',
+    flex: 1,
+    flexShrink: 1,
+    lineHeight: 16,
   },
   disable2FABtn: {
-    paddingVertical: 6,
-    paddingHorizontal: 10,
-    backgroundColor: 'rgba(239, 68, 68, 0.2)',
+    flexShrink: 0,
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    backgroundColor: 'rgba(239, 68, 68, 0.18)',
+    borderWidth: 1,
+    borderColor: Colors.danger,
     borderRadius: 8,
   },
   disable2FAText: {
     color: Colors.danger,
-    fontSize: 11,
-    fontWeight: '700',
+    fontSize: 12,
+    fontWeight: '800',
   },
   qrSetupContainer: {
     marginTop: 12,

@@ -117,4 +117,30 @@ export class AutofillBridgeService {
     } catch {}
     return [];
   }
+
+  static async consumeWebSavedAccounts(): Promise<
+    Array<{ name: string; url: string; username: string; password: string }>
+  > {
+    if (Platform.OS !== 'web' || typeof chrome === 'undefined' || !chrome.storage?.local) {
+      return [];
+    }
+    return new Promise((resolve) => {
+      try {
+        chrome.storage.local.get(['gsoftpass_pending_vault_imports'], (res: any) => {
+          const pending = Array.isArray(res?.gsoftpass_pending_vault_imports)
+            ? res.gsoftpass_pending_vault_imports
+            : [];
+          if (pending.length > 0) {
+            chrome.storage.local.set({ gsoftpass_pending_vault_imports: [] }, () => {
+              resolve(pending);
+            });
+          } else {
+            resolve([]);
+          }
+        });
+      } catch {
+        resolve([]);
+      }
+    });
+  }
 }

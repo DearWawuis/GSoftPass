@@ -268,6 +268,31 @@ export default function App() {
           }
         }
 
+        if (Platform.OS === 'web') {
+          const webPending = await AutofillBridgeService.consumeWebSavedAccounts();
+          if (Array.isArray(webPending) && webPending.length > 0) {
+            const newWebItems: VaultItem[] = webPending.map((p) => {
+              const brand = IconAIService.predictBrandMetadata(p.name || '', p.url || '');
+              return {
+                id: `ext_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+                type: 'account',
+                name: p.name || 'Cuenta Guardada',
+                url: p.url || '',
+                username: p.username || current.email,
+                password: p.password || '',
+                masterEmail: current.email,
+                folderId: brand.suggestedFolderId || 'social',
+                iconUrl: brand.iconUrl || '',
+                brandColor: brand.brandColor || '#6366F1',
+                createdAt: Date.now(),
+                updatedAt: Date.now(),
+              };
+            });
+            workingItems = [...newWebItems, ...workingItems];
+            hasNewNativeItems = true;
+          }
+        }
+
         if (hasNewNativeItems) {
           await handleUpdateVault(workingItems, workingFolders);
           return;

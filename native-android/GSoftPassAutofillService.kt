@@ -82,13 +82,30 @@ class GSoftPassAutofillService : AutofillService() {
 
         val responseBuilder = FillResponse.Builder()
 
-        val saveTypes = (if (usernameField != null) SaveInfo.SAVE_DATA_TYPE_USERNAME else 0) or
-                        (if (passwordField != null) SaveInfo.SAVE_DATA_TYPE_PASSWORD else 0)
         val requiredIds = listOfNotNull(usernameField?.id, passwordField?.id).toTypedArray()
 
-        if (requiredIds.isNotEmpty()) {
-            val saveBuilder = SaveInfo.Builder(saveTypes, requiredIds)
+        if (passwordField != null) {
+            val saveTypes = SaveInfo.SAVE_DATA_TYPE_PASSWORD or
+                (if (usernameField != null) SaveInfo.SAVE_DATA_TYPE_USERNAME else 0)
+            val saveBuilder = SaveInfo.Builder(saveTypes, arrayOf(passwordField.id))
                 .setFlags(SaveInfo.FLAG_SAVE_ON_ALL_VIEWS_INVISIBLE)
+                .setDescription("Guardar acceso de forma segura en tu bóveda GSoftPass")
+            if (usernameField != null) {
+                saveBuilder.setOptionalIds(arrayOf(usernameField.id))
+            }
+            responseBuilder.setSaveInfo(saveBuilder.build())
+        } else if (usernameField != null) {
+            val saveBuilder = SaveInfo.Builder(
+                SaveInfo.SAVE_DATA_TYPE_USERNAME,
+                arrayOf(usernameField.id)
+            )
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                saveBuilder.setFlags(
+                    SaveInfo.FLAG_DELAY_SAVE or SaveInfo.FLAG_SAVE_ON_ALL_VIEWS_INVISIBLE
+                )
+            } else {
+                saveBuilder.setFlags(SaveInfo.FLAG_SAVE_ON_ALL_VIEWS_INVISIBLE)
+            }
             responseBuilder.setSaveInfo(saveBuilder.build())
         }
 

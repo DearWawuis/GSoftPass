@@ -10,11 +10,19 @@ const path = require('path');
 
 function withAutofillGradleDependency(config) {
   return withAppBuildGradle(config, (config) => {
-    const dep = 'implementation("androidx.autofill:autofill:1.1.0")';
+    const autofillDep = 'implementation("androidx.autofill:autofill:1.1.0")';
+    const credentialsDep = 'implementation("androidx.credentials:credentials:1.3.0")';
+
     if (!config.modResults.contents.includes('androidx.autofill:autofill')) {
       config.modResults.contents = config.modResults.contents.replace(
         /dependencies\s*\{/,
-        `dependencies {\n    ${dep}`
+        `dependencies {\n    ${autofillDep}`
+      );
+    }
+    if (!config.modResults.contents.includes('androidx.credentials:credentials')) {
+      config.modResults.contents = config.modResults.contents.replace(
+        /dependencies\s*\{/,
+        `dependencies {\n    ${credentialsDep}`
       );
     }
     return config;
@@ -25,6 +33,7 @@ function withAutofillAndPasskeysManifest(config) {
   return withAndroidManifest(config, async (config) => {
     const mainApplication = config.modResults.manifest.application[0];
     if (!mainApplication.service) mainApplication.service = [];
+    if (!mainApplication.activity) mainApplication.activity = [];
 
     const autofillServiceName = '.autofill.GSoftPassAutofillService';
     if (!mainApplication.service.some((s) => s.$['android:name'] === autofillServiceName)) {
@@ -49,7 +58,7 @@ function withAutofillAndPasskeysManifest(config) {
       mainApplication.service.push({
         $: {
           'android:name': passkeyServiceName,
-          'android:label': 'GSoftPass Passkeys',
+          'android:label': 'GSoftPass',
           'android:permission': 'android.permission.BIND_CREDENTIAL_PROVIDER_SERVICE',
           'android:exported': 'true',
         },
@@ -64,6 +73,18 @@ function withAutofillAndPasskeysManifest(config) {
             },
           },
         ],
+      });
+    }
+
+    const saveActivityName = '.autofill.GSoftPassCredentialSaveActivity';
+    if (!mainApplication.activity.some((a) => a.$['android:name'] === saveActivityName)) {
+      mainApplication.activity.push({
+        $: {
+          'android:name': saveActivityName,
+          'android:theme': '@android:style/Theme.Translucent.NoTitleBar',
+          'android:exported': 'false',
+          'android:excludeFromRecents': 'true',
+        },
       });
     }
 
@@ -113,6 +134,7 @@ function withAutofillNativeFiles(config) {
       [
         'GSoftPassAutofillService.kt',
         'GSoftPassCredentialService.kt',
+        'GSoftPassCredentialSaveActivity.kt',
         'GSoftPassAutofillModule.kt',
         'GSoftPassAutofillPackage.kt',
       ].forEach((file) => {

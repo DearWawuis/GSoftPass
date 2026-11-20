@@ -19,6 +19,7 @@ import android.os.Build
 import android.os.CancellationSignal
 import android.service.autofill.*
 import android.text.InputType
+import android.view.View
 import android.view.autofill.AutofillId
 import android.view.autofill.AutofillValue
 import android.widget.RemoteViews
@@ -35,7 +36,8 @@ class GSoftPassAutofillService : AutofillService() {
     data class ParsedField(
         val id: AutofillId,
         val isPassword: Boolean,
-        val currentValue: String
+        val currentValue: String,
+        val isVisible: Boolean
     )
 
     override fun onFillRequest(
@@ -67,8 +69,11 @@ class GSoftPassAutofillService : AutofillService() {
             }
         }
 
-        val passwordField = detectedFields.lastOrNull { it.isPassword }
-        val usernameField = detectedFields.lastOrNull { !it.isPassword }
+        // Priorizamos campos visibles para evitar campos trampa u ocultos
+        val passwordField = detectedFields.lastOrNull { it.isPassword && it.isVisible }
+            ?: detectedFields.lastOrNull { it.isPassword }
+        val usernameField = detectedFields.lastOrNull { !it.isPassword && it.isVisible }
+            ?: detectedFields.lastOrNull { !it.isPassword }
 
         if (usernameField == null && passwordField == null) {
             callback.onSuccess(null)
@@ -81,18 +86,25 @@ class GSoftPassAutofillService : AutofillService() {
         val rawVaultJson = prefs.getString("SYNCED_VAULT_ITEMS", "[]") ?: "[]"
 
         val responseBuilder = FillResponse.Builder()
-
         val requiredIds = listOfNotNull(usernameField?.id, passwordField?.id).toTypedArray()
 
+        // Ventana inferior persistente de Android ("¿Guardar en GSoftPass?")
+        // Permanece visible hasta que el usuario elija Guardar o Ahora no
         if (passwordField != null) {
             val saveTypes = SaveInfo.SAVE_DATA_TYPE_PASSWORD or
                 (if (usernameField != null) SaveInfo.SAVE_DATA_TYPE_USERNAME else 0)
+
             val saveBuilder = SaveInfo.Builder(saveTypes, arrayOf(passwordField.id))
                 .setFlags(SaveInfo.FLAG_SAVE_ON_ALL_VIEWS_INVISIBLE)
-                .setDescription("Guardar acceso de forma segura en tu bóveda GSoftPass")
+                .setDescription("Guardar acceso en tu bóveda cifrada GSoftPass")
+
             if (usernameField != null) {
                 saveBuilder.setOptionalIds(arrayOf(usernameField.id))
             }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                saveBuilder.setNegativeAction(SaveInfo.NEGATIVE_BUTTON_STYLE_REJECT, null)
+            }
+
             responseBuilder.setSaveInfo(saveBuilder.build())
         } else if (usernameField != null) {
             val saveBuilder = SaveInfo.Builder(
@@ -105,6 +117,9 @@ class GSoftPassAutofillService : AutofillService() {
                 )
             } else {
                 saveBuilder.setFlags(SaveInfo.FLAG_SAVE_ON_ALL_VIEWS_INVISIBLE)
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                saveBuilder.setNegativeAction(SaveInfo.NEGATIVE_BUTTON_STYLE_REJECT, null)
             }
             responseBuilder.setSaveInfo(saveBuilder.build())
         }
@@ -131,7 +146,7 @@ class GSoftPassAutofillService : AutofillService() {
         var inlineSlotIndex = 0
         var addedDatasets = 0
 
-        // 1. ICONO INICIAL FIJADO DE GSOFTPASS (A todo color, sin tinte blanco)
+        // 1. Icono inicial fijado de GSoftPass a color
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && inlineEnabled && inlineSpecs.isNotEmpty() && maxInline > 1 && requiredIds.isNotEmpty()) {
             val openAppIntent = packageManager.getLaunchIntentForPackage(packageName) ?: Intent()
             val openPending = PendingIntent.getActivity(
@@ -160,7 +175,7 @@ class GSoftPassAutofillService : AutofillService() {
             }
         }
 
-        // 2. CUENTAS GUARDADAS: Icono de la cuenta (IA) -> Correo/Usuario -> Nombre de la cuenta
+        // 2. Cuentas guardadas con icono de IA, usuario/correo y nombre
         for ((index, cred) in sortedCredentials.withIndex()) {
             val accName = cred.optString("name", "Cuenta")
             val accUser = cred.optString("username", "")
@@ -293,9 +308,6 @@ class GSoftPassAutofillService : AutofillService() {
         }
     }
 
-    /**
-     * Preserva los colores originales del icono evitando que Gboard/Samsung lo pinte de blanco.
-     */
     @RequiresApi(Build.VERSION_CODES.Q)
     private fun toUntintedIcon(bitmap: Bitmap): Icon {
         val scaled = if (bitmap.width != 96 || bitmap.height != 96) {
@@ -308,12 +320,6 @@ class GSoftPassAutofillService : AutofillService() {
         }
     }
 
-    /**
-     * Obtiene el icono de la cuenta en orden de prioridad:
-     * 1. Icono generado por IconAIService (descargado y cacheado en autofill_icons/<id>.png)
-     * 2. Icono instalado de la app cliente (si el sistema lo permite)
-     * 3. Insignia circular con el brandColor de IA y la inicial de la cuenta
-     */
     @RequiresApi(Build.VERSION_CODES.Q)
     private fun getCredentialIconUntinted(cred: JSONObject, clientPackage: String): Icon {
         val id = cred.optString("id", "").trim()
@@ -397,20 +403,26 @@ class GSoftPassAutofillService : AutofillService() {
             return
         }
 
-        val structure = contexts[contexts.size - 1].structure
-        val clientPackage = structure.activityComponent?.packageName ?: "app"
-        val detectedFields = mutableListOf<ParsedField>()
+        val lastStructure = contexts[contexts.size - 1].structure
+        val clientPackage = lastStructure.activityComponent?.packageName ?: "app"
+        val allDetectedFields = mutableListOf<ParsedField>()
         var webDomainFound = ""
 
-        for (i in 0 until structure.windowNodeCount) {
-            val rootNode = structure.getWindowNodeAt(i).rootViewNode
-            traverseNodeForFill(rootNode, detectedFields) { domain ->
-                if (domain.isNotEmpty()) webDomainFound = domain
+        // Recorremos TODOS los fillContexts para capturar usuario + contraseña incluso en logins de 2 pasos
+        for (ctx in contexts) {
+            val structure = ctx.structure
+            for (i in 0 until structure.windowNodeCount) {
+                val rootNode = structure.getWindowNodeAt(i).rootViewNode
+                traverseNodeForFill(rootNode, allDetectedFields) { domain ->
+                    if (domain.isNotEmpty()) webDomainFound = domain
+                }
             }
         }
 
-        val savedPassword = detectedFields.lastOrNull { it.isPassword && it.currentValue.isNotEmpty() }?.currentValue ?: ""
-        val savedUsername = detectedFields.lastOrNull { !it.isPassword && it.currentValue.isNotEmpty() }?.currentValue ?: ""
+        val savedPassword = allDetectedFields
+            .lastOrNull { it.isPassword && it.currentValue.isNotEmpty() }?.currentValue ?: ""
+        val savedUsername = allDetectedFields
+            .lastOrNull { !it.isPassword && it.currentValue.isNotEmpty() }?.currentValue ?: ""
 
         if (savedPassword.isNotEmpty() || savedUsername.isNotEmpty()) {
             val prefs = getSharedPreferences("GSoftPassAutofillPrefs", Context.MODE_PRIVATE)
@@ -466,16 +478,20 @@ class GSoftPassAutofillService : AutofillService() {
         val hintText = (node.hint ?: "").toString().lowercase()
         val autofillHints = node.autofillHints?.map { it.lowercase() } ?: emptyList()
         val inputType = node.inputType
+        val autofillType = node.autofillType
         val htmlName = node.htmlInfo?.attributes?.firstOrNull { it.first.lowercase() == "name" }?.second?.lowercase() ?: ""
         val htmlType = node.htmlInfo?.attributes?.firstOrNull { it.first.lowercase() == "type" }?.second?.lowercase() ?: ""
 
-        val isEditText = className.contains("edittext") ||
-                         className.contains("autocompletetextview") ||
-                         className.contains("textinput") ||
-                         htmlType.isNotEmpty() ||
-                         inputType != 0
+        // Incluye View.AUTOFILL_TYPE_TEXT para detectar apps hechas con Jetpack Compose (como Twitch)
+        val isEditableField =
+            autofillType == View.AUTOFILL_TYPE_TEXT ||
+            className.contains("edittext") ||
+            className.contains("autocompletetextview") ||
+            className.contains("textinput") ||
+            htmlType.isNotEmpty() ||
+            inputType != 0
 
-        if (autofillId != null && isEditText) {
+        if (autofillId != null && isEditableField) {
             val variation = inputType and InputType.TYPE_MASK_VARIATION
             val isPasswordInputType =
                 variation == InputType.TYPE_TEXT_VARIATION_PASSWORD ||
@@ -518,10 +534,12 @@ class GSoftPassAutofillService : AutofillService() {
                 if (it.isText) it.textValue.toString() else ""
             } ?: (node.text?.toString() ?: "")
 
+            val nodeVisible = node.visibility == View.VISIBLE
+
             if (isPassword) {
-                fields.add(ParsedField(autofillId, true, currentText))
+                fields.add(ParsedField(autofillId, true, currentText, nodeVisible))
             } else if (isUsername) {
-                fields.add(ParsedField(autofillId, false, currentText))
+                fields.add(ParsedField(autofillId, false, currentText, nodeVisible))
             }
         }
 
